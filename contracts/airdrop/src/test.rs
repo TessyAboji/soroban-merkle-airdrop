@@ -654,6 +654,28 @@ fn test_negative_total_amount_fails() {
     assert_eq!(result, Err(Ok(AirdropError::ZeroAmount)));
 }
 
+/// Issue #124: initialize with total_amount = 0 must return ZeroAmount.
+///
+/// The guard `if total_amount <= 0` covers both negative and zero values.
+/// This test explicitly exercises the zero boundary to ensure the check is not
+/// accidentally loosened to `< 0` in a future refactor.
+#[test]
+fn test_zero_total_amount_fails() {
+    let (env, admin, token, contract_id) = setup();
+    let client = AirdropContractClient::new(&env, &contract_id);
+    let claimant = Address::generate(&env);
+
+    let (root, _, _) = build_two_leaf_tree(&env, &contract_id, &claimant, 1000, &admin, 500);
+
+    // Do NOT mint — the rejection must happen before any token transfer.
+    let result = client.try_initialize(&admin, &token, &root, &0, &DEFAULT_EXPIRATION, &None, &None);
+    assert_eq!(
+        result,
+        Err(Ok(AirdropError::ZeroAmount)),
+        "initialize with total_amount = 0 must return ZeroAmount"
+    );
+}
+
 #[test]
 fn test_negative_claim_amount_fails() {
     let (env, admin, token, contract_id) = setup();
