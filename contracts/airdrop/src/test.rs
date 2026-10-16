@@ -1451,15 +1451,15 @@ fn test_reclaim_zero_balance_after_all_claimed() {
         "admin balance must be unchanged when reclaiming a zero-balance contract"
     );
 
-    // The ("reclaimed", admin) event must still be emitted with data = 0.
+    // The ("reclaimed", admin) event must still be emitted with data = (0, expiration).
     assert_eq!(
         contract_events(&env, &contract_id),
         expected_events(
             &env,
             &contract_id,
-            &[((symbol_short!("reclaimed"), admin.clone()), 0_i128.into_val(&env))],
+            &[((symbol_short!("reclaimed"), admin.clone()), (0_i128, DEFAULT_EXPIRATION).into_val(&env))],
         ),
-        "reclaim() must emit ('reclaimed', admin) with amount=0 even when nothing is transferred"
+        "reclaim() must emit ('reclaimed', admin) with (balance=0, expiration) even when nothing is transferred"
     );
 }
 
@@ -1868,4 +1868,132 @@ fn test_reclaim_before_initialize_fails() {
     // No initialize call — contract storage is empty.
     let result = client.try_reclaim();
     assert_eq!(result, Err(Ok(AirdropError::NotInitialized)));
+}
+
+// ─── Issue #137: Pre-initialisation query tests ──────────────────────────────
+
+/// On a freshly registered, uninitialised contract:
+///   - admin()        → None
+///   - token()        → None
+///   - merkle_root()  → None
+///   - expiration()   → None
+///
+/// These return `Option` values, and none of the underlying storage keys have
+/// been written yet, so each query must return `None`.
+#[test]
+fn test_pre_init_option_queries_return_none() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(AirdropContract, ());
+    let client = AirdropContractClient::new(&env, &contract_id);
+
+    assert_eq!(
+        client.admin(),
+        None,
+        "admin() must return None on an uninitialised contract"
+    );
+    assert_eq!(
+        client.token(),
+        None,
+        "token() must return None on an uninitialised contract"
+    );
+    assert_eq!(
+        client.merkle_root(),
+        None,
+        "merkle_root() must return None on an uninitialised contract"
+    );
+    assert_eq!(
+        client.expiration(),
+        None,
+        "expiration() must return None on an uninitialised contract"
+    );
+}
+
+/// On a freshly registered, uninitialised contract:
+///   - is_active() → false
+///
+/// `is_active()` falls back to `unwrap_or(false)` when the key is absent, so
+/// it must return `false` — not panic.
+#[test]
+fn test_pre_init_is_active_returns_false() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(AirdropContract, ());
+    let client = AirdropContractClient::new(&env, &contract_id);
+
+    assert!(
+        !client.is_active(),
+        "is_active() must return false on an uninitialised contract"
+    );
+}
+
+/// On a freshly registered, uninitialised contract:
+///   - total_deposited() → 0
+///
+/// `total_deposited()` falls back to `unwrap_or(0)` when the key is absent, so
+/// it must return `0` — not panic.
+#[test]
+fn test_pre_init_total_deposited_returns_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(AirdropContract, ());
+    let client = AirdropContractClient::new(&env, &contract_id);
+
+    assert_eq!(
+        client.total_deposited(),
+        0,
+        "total_deposited() must return 0 on an uninitialised contract"
+    );
+}
+
+/// On a freshly registered, uninitialised contract:
+///   - is_claimed(any_addr) → false
+///
+/// No `Claimed(addr)` persistent entries exist, so every address must report
+/// unclaimed — the persistent storage `has()` check returns false.
+#[test]
+fn test_pre_init_is_claimed_returns_false_for_any_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(AirdropContract, ());
+    let client = AirdropContractClient::new(&env, &contract_id);
+
+    // Test a freshly generated address — it has never claimed.
+    let random_addr = Address::generate(&env);
+    assert!(
+        !client.is_claimed(&random_addr),
+        "is_claimed(any_addr) must return false on an uninitialised contract"
+    );
+
+    // Also test a second distinct address to rule out any accidental state.
+    let another_addr = Address::generate(&env);
+    assert!(
+        !client.is_claimed(&another_addr),
+        "is_claimed must return false for a second arbitrary address on an uninitialised contract"
+    );
+}
+
+/// Consolidates all pre-init query assertions in a single test for readability.
+///
+/// This is the canonical "everything-before-initialize" test referenced in the
+/// issue. The individual focused tests above are kept for clearer failure messages.
+#[test]
+fn test_pre_init_all_queries() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(AirdropContract, ());
+    let client = AirdropContractClient::new(&env, &contract_id);
+
+    let random_addr = Address::generate(&env);
+
+    // Option-returning queries → None
+    assert_eq!(client.admin(), None,        "admin() must be None before init");
+    assert_eq!(client.token(), None,        "token() must be None before init");
+    assert_eq!(client.merkle_root(), None,  "merkle_root() must be None before init");
+    assert_eq!(client.expiration(), None,   "expiration() must be None before init");
+
+    // Bool / numeric queries → safe defaults
+    assert!(!client.is_active(),            "is_active() must be false before init");
+    assert_eq!(client.total_deposited(), 0, "total_deposited() must be 0 before init");
+    assert!(!client.is_claimed(&random_addr), "is_claimed(addr) must be false before init");
 }
