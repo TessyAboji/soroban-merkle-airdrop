@@ -482,8 +482,11 @@ impl AirdropContract {
             token_client.transfer(&env.current_contract_address(), &admin, &balance);
         }
 
+        // Emit enriched event: topic = ("reclaimed", admin), data = (balance, expiration).
+        // Including `expiration` lets indexers correlate reclaim events with the
+        // airdrop window and track reclaim history without a separate state query.
         env.events()
-            .publish((symbol_short!("reclaimed"), admin), balance);
+            .publish((symbol_short!("reclaimed"), admin), (balance, expiration));
 
         Ok(balance)
     }

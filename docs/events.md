@@ -118,16 +118,20 @@ Emitted when the admin recovers unclaimed tokens from the contract after the air
 ### Data
 
 ```
-i128(balance)
+( i128(balance), u64(expiration) )
 ```
 
-| Field     | Type    | Description                                             |
-|-----------|---------|---------------------------------------------------------|
-| `balance` | `i128`  | The remaining token balance transferred back to admin   |
+| Field        | Type    | Description                                                     |
+|--------------|---------|-----------------------------------------------------------------|
+| `balance`    | `i128`  | The remaining token balance transferred back to admin           |
+| `expiration` | `u64`   | The airdrop expiration timestamp (unix seconds) from storage    |
+
+Including `expiration` in the event lets indexers correlate each reclaim with the
+airdrop window it closed — without making a separate state query after the fact.
 
 ### When emitted
 
-After the contract transfers its entire remaining token balance back to the admin. Not emitted if the call is unauthorized or the airdrop has not yet expired.
+After the contract transfers its entire remaining token balance back to the admin. Not emitted if the call is unauthorized or the airdrop has not yet expired. Emitted with `balance = 0` when all tokens were already claimed before reclaim was called.
 
 ### Example
 
@@ -140,7 +144,10 @@ After the contract transfers its entire remaining token balance back to the admi
     { "type": "symbol", "value": "reclaimed" },
     { "type": "address", "value": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" }
   ],
-  "data": { "type": "i128", "value": "750000" }
+  "data": [
+    { "type": "i128", "value": "750000" },
+    { "type": "u64", "value": "1735689600" }
+  ]
 }
 ```
 
@@ -261,9 +268,11 @@ function parseAirdropEvent(raw: any): AirdropEvent | null {
     }
 
     case "reclaimed": {
+      const [balanceRaw, expirationRaw] = raw.value as any[];
       const data: ReclaimedEvent = {
         admin: address,
-        balance: BigInt((raw.value as any).value),
+        balance: BigInt(balanceRaw.value),
+        expiration: BigInt(expirationRaw.value),
       };
       return { type: "reclaimed", data };
     }
@@ -321,5 +330,5 @@ const { events: claimEvents } = await rpc.getEvents({
 |--------------|--------------|-----------|----------------------------------|
 | `init`       | `initialize` | admin     | `(BytesN<32>, i128)`            |
 | `claimed`    | `claim`      | claimant  | `i128`                          |
-| `reclaimed`  | `reclaim`    | admin     | `i128`                          |
+| `reclaimed`  | `reclaim`    | admin     | `(i128, u64)`                   |
 | `paused`     | `set_active` | admin     | `bool`                          |
