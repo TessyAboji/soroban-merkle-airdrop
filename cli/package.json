@@ -10,7 +10,8 @@
     "build": "tsc",
     "dev": "ts-node src/index.ts",
     "test": "vitest run",
-    "lint": "pnpm exec eslint src --ext .ts"
+    "lint": "pnpm exec eslint src --ext .ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@soroban-merkle-airdrop/sdk": "workspace:*",

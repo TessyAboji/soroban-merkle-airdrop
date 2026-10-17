@@ -10,6 +10,16 @@
  *   - Amount must be a non-empty, non-whitespace string that parses as a
  *     positive integer (BigInt > 0).
  *   - Clear, line-numbered error messages are emitted for any invalid row.
+ *
+ * Issue #70: Auto-detect and skip CSV header row.
+ *   - If the first non-comment, non-blank line has "address" as its first
+ *     field (case-insensitive) it is treated as a header and skipped.
+ *   - --has-header forces header skipping even when auto-detection would
+ *     not trigger (e.g. if the first field is not exactly "address").
+ *
+ * Issue #67: --json flag.
+ *   - When --json is passed, the tree JSON is printed to stdout and the
+ *     spinner / coloured output is suppressed.
  */
 
 import { Command } from "commander";
@@ -18,7 +28,7 @@ import { resolve } from "path";
 import chalk from "chalk";
 import ora from "ora";
 import { StrKey } from "@stellar/stellar-sdk";
-import { buildMerkleTree } from "@soroban-merkle-airdrop/sdk";
+import { buildMerkleTree, formatAmount } from "@soroban-merkle-airdrop/sdk";
 import type { AirdropEntry } from "@soroban-merkle-airdrop/sdk";
 
 /**
@@ -118,6 +128,19 @@ export function parseAndValidateLine(rawLine: string, lineNum: number): AirdropE
 }
 
 /**
+ * Detect whether `line` looks like a CSV header row.
+ *
+ * Returns `true` when the first comma-delimited field, trimmed and
+ * lower-cased, equals `"address"`.
+ *
+ * @param line - The raw CSV line to inspect.
+ */
+export function isHeaderRow(line: string): boolean {
+  const firstField = line.split(",")[0]?.trim().toLowerCase() ?? "";
+  return firstField === "address";
+}
+
+/**
  * Factory that creates a fresh `generate` Command instance.
  * Exporting a factory rather than a singleton means tests can call
  * `makeGenerateCommand()` to get a clean instance with no cached option
@@ -128,8 +151,25 @@ export function makeGenerateCommand(): Command {
     .description("Build a Merkle tree from a CSV airdrop list")
     .requiredOption("-i, --input <file>", "CSV file: address,amount (one per line)")
     .requiredOption("-o, --output <file>", "Output JSON file for Merkle tree + proofs")
+    .requiredOption(
+      "-c, --contract-id <address>",
+      "Deployed airdrop contract address (C...) — included as domain separator in leaf hashes"
+    )
+    .option("--has-header", "Force-skip the first data row as a CSV header")
+    .option("--json", "Print tree JSON to stdout instead of writing to --output (suppresses spinner)")
+    .option("--decimals <n>", "Token decimal places for human-readable amount display (e.g. 7 for XLM)")
     .action(async (opts) => {
-      const spinner = ora("Reading airdrop list...").start();
+      const jsonMode: boolean = opts.json ?? false;
+
+      // In JSON mode suppress the spinner so stdout stays clean.
+      const spinner = jsonMode
+        ? {
+            start: () => spinner,
+            succeed: () => {},
+            fail: (msg: string) => { console.error(msg); },
+            text: "",
+          }
+        : ora("Reading airdrop list...").start();
 
       try {
         const csv = await readFile(resolve(opts.input), "utf-8");
@@ -138,6 +178,7 @@ export function makeGenerateCommand(): Command {
 
         const lines = csv.split("\n");
         let lineNum = 0;
+        let headerSkipped = false;
 
         for (const line of lines) {
           lineNum++;
@@ -145,6 +186,16 @@ export function makeGenerateCommand(): Command {
 
           // Skip blank lines and comments
           if (!trimmed || trimmed.startsWith("#")) continue;
+
+          // Issue #70: skip header row.
+          // --has-header: always skip the first data line.
+          // Auto-detect: skip if first field is "address" (case-insensitive).
+          if (!headerSkipped) {
+            if (opts.hasHeader || isHeaderRow(trimmed)) {
+              headerSkipped = true;
+              continue;
+            }
+          }
 
           try {
             entries.push(parseAndValidateLine(line, lineNum));
@@ -155,7 +206,9 @@ export function makeGenerateCommand(): Command {
 
         // Report all validation errors at once before aborting
         if (errors.length > 0) {
-          spinner.fail(chalk.red(`Found ${errors.length} validation error(s) in ${opts.input}:`));
+          (spinner as { fail: (msg: string) => void }).fail(
+            chalk.red(`Found ${errors.length} validation error(s) in ${opts.input}:`)
+          );
           for (const e of errors) {
             console.error(`  ${chalk.red("✖")} ${e}`);
           }
@@ -163,17 +216,23 @@ export function makeGenerateCommand(): Command {
         }
 
         if (entries.length === 0) {
-          spinner.fail(chalk.red("CSV contains no valid entries"));
+          (spinner as { fail: (msg: string) => void }).fail(
+            chalk.red("CSV contains no valid entries")
+          );
           process.exit(1);
         }
 
-        spinner.text = `Building Merkle tree for ${entries.length} entries...`;
-        const { root, proofs } = buildMerkleTree(entries);
+        (spinner as { text: string }).text = `Building Merkle tree for ${entries.length} entries...`;
+        const { root, proofs } = buildMerkleTree(opts.contractId as string, entries);
+
+        const totalRaw = entries.reduce((s, e) => s + e.amount, 0n);
+        const decimals: number | null =
+          opts.decimals !== undefined ? parseInt(opts.decimals as string, 10) : null;
 
         const output = {
           root,
           totalEntries: entries.length,
-          totalAmount: entries.reduce((s, e) => s + e.amount, 0n).toString(),
+          totalAmount: totalRaw.toString(),
           generatedAt: new Date().toISOString(),
           proofs: Object.fromEntries(
             [...proofs.entries()].map(([addr, p]) => [
@@ -183,13 +242,29 @@ export function makeGenerateCommand(): Command {
           ),
         };
 
+        // Issue #67: --json mode — print to stdout, skip file write.
+        if (jsonMode) {
+          console.log(JSON.stringify(output, null, 2));
+          return;
+        }
+
         await writeFile(resolve(opts.output), JSON.stringify(output, null, 2));
-        spinner.succeed(chalk.green(`Merkle tree generated!`));
+        (spinner as ReturnType<typeof ora>).succeed(chalk.green(`Merkle tree generated!`));
         console.log(`\n  ${chalk.bold("Root:")}    ${chalk.cyan(root)}`);
         console.log(`  ${chalk.bold("Entries:")} ${entries.length}`);
+
+        // Issue #58: show formatted total when --decimals is provided.
+        if (decimals !== null && !isNaN(decimals)) {
+          console.log(
+            `  ${chalk.bold("Total:")}   ${formatAmount(totalRaw, decimals)} (${totalRaw.toString()} raw)`
+          );
+        } else {
+          console.log(`  ${chalk.bold("Total:")}   ${totalRaw.toString()}`);
+        }
+
         console.log(`  ${chalk.bold("Output:")}  ${opts.output}\n`);
       } catch (err) {
-        spinner.fail(`Error: ${(err as Error).message}`);
+        (spinner as { fail: (msg: string) => void }).fail(`Error: ${(err as Error).message}`);
         process.exit(1);
       }
     });

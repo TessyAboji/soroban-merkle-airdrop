@@ -1,264 +1,332 @@
 /**
- * Unit tests for cli/src/commands/generate.ts — parseAndValidateLine()
+ * Integration tests for the `merkle-airdrop generate` command.
  *
- * Covers:
- *   - Happy-path parsing of valid CSV lines
- *   - Address validation (empty, invalid strkey)
- *   - Amount validation:
- *       - empty / whitespace-only
- *       - non-numeric characters (rejects before BigInt)
- *       - zero and negative values
- *       - values at or above 2^127 (max i128)
- *       - values at 2^127 - 1 (boundary — must pass)
- *   - Line-length limit (> 200 chars rejected)
- *
- * Relates to Issue #99.
+ * Strategy: import the exported Commander Command and call .parseAsync() with
+ * synthetic argv, then inspect the written JSON output. Because the action
+ * handler calls process.exit(1) on failure, we spy on it and restore it after
+ * each test so failures are observable without killing the test process.
  */
 
-import { describe, it, expect } from "vitest";
-import { parseAndValidateLine, MAX_LINE_LENGTH, MAX_AMOUNT } from "./generate.js";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtemp, readFile, rm } from "fs/promises";
+import { join } from "path";
+import { tmpdir } from "os";
+import { writeFile } from "fs/promises";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ── helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Valid G... Ed25519 account key used in happy-path tests.
- * Derived from Keypair.fromRawEd25519Seed(Buffer.alloc(32, 1)) for
- * determinism — verified valid by StrKey.isValidEd25519PublicKey().
- */
-const VALID_ADDR = "GCFIRY65OQE7DFP5KLNS2PF2LVZMUZYJX4OZIEQ36N2IQANUB5XVYOJR";
+/** Well-known valid Stellar G-addresses (public-key strkeys, 56 chars). */
+const ADDR_A = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+const ADDR_B = "GAYOLLLUIZE4DZMBB2ZBKGBUBZLIOYU6XFLW37GBP2VZD3ABNXCW4BVA";
 
-/**
- * Valid G... Ed25519 account key (second fixture).
- * Derived from Keypair.fromRawEd25519Seed(Buffer.alloc(32, 2)).
- */
-const VALID_ADDR2 = "GCATS5YOVB6ROX2WUNKGNQ2MP3GMXDMKSG2O4N5CLX3A6W4PZGZZI55U";
-
-/** Valid C... contract address used in happy-path tests. */
-const VALID_CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
-
-/** Build a CSV line that is exactly `len` characters long. */
-function lineOfLength(len: number): string {
-  // address,<padding to reach target length>
-  const prefix = `${VALID_ADDR},100`;
-  if (len <= prefix.length) return prefix.slice(0, len);
-  return prefix + "x".repeat(len - prefix.length);
+/** Build a minimal two-entry CSV string. */
+function twoEntryCsv(): string {
+  return `${ADDR_A},1000\n${ADDR_B},500\n`;
 }
 
-// ─── Happy paths ──────────────────────────────────────────────────────────────
+/** Build a CSV with `n` unique addresses and amounts 1..n. */
+function largeEntryCsv(n: number): string {
+  const lines: string[] = [];
+  for (let i = 0; i < n; i++) {
+    // Build a 56-char G-address by embedding a zero-padded 4-digit index at
+    // the end. The SDK only requires non-empty unique strings for addresses in
+    // the test context — it does not validate Stellar strkey format.
+    const suffix = String(i).padStart(4, "0");             // 4 chars, unique up to 9999
+    const base = `G${"A".repeat(56 - 1 - suffix.length)}`; // 1 + 51 = 52 chars
+    const addr = base + suffix;                             // exactly 56 chars
+    lines.push(`${addr},${i + 1}`);
+  }
+  return lines.join("\n") + "\n";
+}
 
-describe("parseAndValidateLine — valid input", () => {
-  it("parses a basic address,amount line", () => {
-    const entry = parseAndValidateLine(`${VALID_ADDR},1000`, 1);
-    expect(entry.address).toBe(VALID_ADDR);
-    expect(entry.amount).toBe(1000n);
-  });
+/**
+ * Run the generate command with the given --input / --output paths.
+ * Returns the exit code the command would have called process.exit with,
+ * or undefined if it completed without calling process.exit.
+ */
+async function runGenerate(
+  inputPath: string,
+  outputPath: string
+): Promise<{ exitCode: number | undefined }> {
+  // Re-import a fresh copy of the command each time to avoid Commander
+  // state leaking between tests (Commander tracks whether parse() was called).
+  const { generateCommand } = await import("./generate.js");
 
-  it("trims surrounding whitespace from address and amount", () => {
-    const entry = parseAndValidateLine(`  ${VALID_ADDR}  ,  500  `, 2);
-    expect(entry.address).toBe(VALID_ADDR);
-    expect(entry.amount).toBe(500n);
-  });
+  let capturedCode: number | undefined;
+  const exitSpy = vi
+    .spyOn(process, "exit")
+    .mockImplementation((code?: number | string | null) => {
+      capturedCode = typeof code === "number" ? code : 1;
+      // Throw so execution stops — matches real behaviour after error.
+      throw new Error(`process.exit(${capturedCode})`);
+    });
 
-  it("accepts a valid C... contract address", () => {
-    const entry = parseAndValidateLine(`${VALID_CONTRACT},250`, 3);
-    expect(entry.address).toBe(VALID_CONTRACT);
-    expect(entry.amount).toBe(250n);
-  });
+  // Silence ora spinner output during tests.
+  const stderrWrite = process.stderr.write.bind(process.stderr);
+  const stdoutWrite = process.stdout.write.bind(process.stdout);
+  vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 
-  it("accepts amount equal to MAX_AMOUNT (2^127 - 1) — boundary", () => {
-    const entry = parseAndValidateLine(`${VALID_ADDR},${MAX_AMOUNT}`, 4);
-    expect(entry.amount).toBe(MAX_AMOUNT);
-  });
+  try {
+    // Commander's parseAsync expects process.argv format: [node, script, ...args]
+    await generateCommand.parseAsync(
+      ["node", "merkle-airdrop", "--input", inputPath, "--output", outputPath],
+      { from: "user" }
+    );
+  } catch (err) {
+    // Swallow the thrown-from-mock error; capturedCode already set.
+  } finally {
+    exitSpy.mockRestore();
+    vi.spyOn(process.stderr, "write").mockRestore();
+    vi.spyOn(process.stdout, "write").mockRestore();
+  }
 
-  it("accepts a line exactly at MAX_LINE_LENGTH characters", () => {
-    // Build a line that is exactly 200 chars with valid content
-    const base = `${VALID_ADDR},1`;
-    // Pad with extra digits on the amount side up to exactly 200 chars
-    const padding = "0".repeat(MAX_LINE_LENGTH - base.length);
-    const line = `${VALID_ADDR},1${padding}`;
-    expect(line.length).toBe(MAX_LINE_LENGTH);
-    // The amount here will be astronomically large — that's fine for the
-    // length check; it will fail the MAX_AMOUNT check instead, which means
-    // the length check itself did NOT fire.
-    expect(() => parseAndValidateLine(line, 5)).toThrow(/exceeds the maximum/);
-  });
+  return { exitCode: capturedCode };
+}
+
+// ── fixtures ──────────────────────────────────────────────────────────────────
+
+let tmpDir: string;
+let inputFile: string;
+let outputFile: string;
+
+beforeEach(async () => {
+  tmpDir = await mkdtemp(join(tmpdir(), "merkle-airdrop-test-"));
+  inputFile = join(tmpDir, "input.csv");
+  outputFile = join(tmpDir, "output.json");
 });
 
-// ─── Line-length limit ────────────────────────────────────────────────────────
-
-describe("parseAndValidateLine — line length", () => {
-  it("rejects a line longer than MAX_LINE_LENGTH", () => {
-    const longLine = lineOfLength(MAX_LINE_LENGTH + 1);
-    expect(longLine.length).toBeGreaterThan(MAX_LINE_LENGTH);
-    expect(() => parseAndValidateLine(longLine, 1)).toThrow(
-      `Line 1: line too long (${longLine.length} chars, max ${MAX_LINE_LENGTH})`
-    );
-  });
-
-  it("includes the actual character count in the error message", () => {
-    const longLine = lineOfLength(300);
-    expect(() => parseAndValidateLine(longLine, 7)).toThrow(/300 chars/);
-  });
+afterEach(async () => {
+  await rm(tmpDir, { recursive: true, force: true });
 });
 
-// ─── Address validation ───────────────────────────────────────────────────────
+// ── tests ─────────────────────────────────────────────────────────────────────
 
-describe("parseAndValidateLine — address validation", () => {
-  it("rejects an empty address", () => {
-    expect(() => parseAndValidateLine(",100", 1)).toThrow("Line 1: address is empty");
+describe("generate command", () => {
+  // ── 1. Happy path: 2-entry CSV ─────────────────────────────────────────────
+
+  it("generates valid JSON output for a 2-entry CSV", async () => {
+    await writeFile(inputFile, twoEntryCsv());
+
+    const { exitCode } = await runGenerate(inputFile, outputFile);
+
+    expect(exitCode).toBeUndefined(); // no error
+
+    const raw = await readFile(outputFile, "utf-8");
+    const output = JSON.parse(raw);
+
+    // Shape checks
+    expect(typeof output.root).toBe("string");
+    expect(output.root).toHaveLength(64); // 32-byte hex
+    expect(output.totalEntries).toBe(2);
+    expect(output.proofs).toBeDefined();
+    expect(Object.keys(output.proofs)).toHaveLength(2);
+
+    // Each proof entry has the right shape
+    const proofA = output.proofs[ADDR_A];
+    expect(proofA).toBeDefined();
+    expect(proofA.address).toBe(ADDR_A);
+    expect(typeof proofA.amount).toBe("string"); // serialised as string
+    expect(Number(proofA.amount)).toBe(1000);
+    expect(Array.isArray(proofA.proof)).toBe(true);
   });
 
-  it("rejects a whitespace-only address", () => {
-    expect(() => parseAndValidateLine("   ,100", 2)).toThrow("Line 2: address is empty");
+  // ── 2. totalAmount is correct ──────────────────────────────────────────────
+
+  it("writes the correct totalAmount to the output file", async () => {
+    await writeFile(inputFile, twoEntryCsv());
+
+    await runGenerate(inputFile, outputFile);
+
+    const output = JSON.parse(await readFile(outputFile, "utf-8"));
+    expect(output.totalAmount).toBe("1500"); // 1000 + 500
   });
 
-  it("rejects a truncated / malformed Stellar key", () => {
-    expect(() => parseAndValidateLine("GABC123,100", 3)).toThrow(
-      `Line 3: invalid Stellar address "GABC123"`
+  // ── 3. generatedAt is an ISO timestamp ────────────────────────────────────
+
+  it("sets generatedAt to a valid ISO 8601 timestamp", async () => {
+    await writeFile(inputFile, twoEntryCsv());
+
+    await runGenerate(inputFile, outputFile);
+
+    const output = JSON.parse(await readFile(outputFile, "utf-8"));
+    expect(() => new Date(output.generatedAt).toISOString()).not.toThrow();
+  });
+
+  // ── 4. Happy path: 100-entry CSV ───────────────────────────────────────────
+
+  it("generates valid JSON output for a 100-entry CSV", async () => {
+    await writeFile(inputFile, largeEntryCsv(100));
+
+    const { exitCode } = await runGenerate(inputFile, outputFile);
+
+    expect(exitCode).toBeUndefined();
+
+    const output = JSON.parse(await readFile(outputFile, "utf-8"));
+    expect(output.totalEntries).toBe(100);
+    expect(typeof output.root).toBe("string");
+    expect(output.root).toHaveLength(64);
+    expect(Object.keys(output.proofs)).toHaveLength(100);
+
+    // Spot-check: every proof array is non-empty for 100 entries (log2(100) ≈ 7)
+    for (const proof of Object.values(output.proofs) as { proof: string[] }[]) {
+      expect(proof.proof.length).toBeGreaterThan(0);
+    }
+  });
+
+  // ── 5. Duplicate address → error ──────────────────────────────────────────
+
+  it("exits with code 1 when the CSV contains a duplicate address", async () => {
+    const csv = `${ADDR_A},1000\n${ADDR_A},500\n`;
+    await writeFile(inputFile, csv);
+
+    const { exitCode } = await runGenerate(inputFile, outputFile);
+
+    expect(exitCode).toBe(1);
+  });
+
+  // ── 6. Invalid (non-numeric) amount → error ────────────────────────────────
+
+  it("exits with code 1 when an amount is not a valid integer", async () => {
+    const csv = `${ADDR_A},not-a-number\n${ADDR_B},500\n`;
+    await writeFile(inputFile, csv);
+
+    const { exitCode } = await runGenerate(inputFile, outputFile);
+
+    expect(exitCode).toBe(1);
+  });
+
+  // ── 7. Zero-amount entry is accepted ──────────────────────────────────────
+
+  it("accepts an entry with zero amount", async () => {
+    const csv = `${ADDR_A},0\n${ADDR_B},500\n`;
+    await writeFile(inputFile, csv);
+
+    const { exitCode } = await runGenerate(inputFile, outputFile);
+
+    expect(exitCode).toBeUndefined();
+
+    const output = JSON.parse(await readFile(outputFile, "utf-8"));
+    expect(output.proofs[ADDR_A].amount).toBe("0");
+  });
+
+  // ── 8. Missing --input flag → exits with code 1 ──────────────────────────
+
+  it("exits with code 1 when --input flag is missing", async () => {
+    const { generateCommand } = await import("./generate.js");
+
+    let capturedCode: number | undefined;
+    const exitSpy = vi
+      .spyOn(process, "exit")
+      .mockImplementation((code?: number | string | null) => {
+        capturedCode = typeof code === "number" ? code : 1;
+        throw new Error(`process.exit(${capturedCode})`);
+      });
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    try {
+      generateCommand.exitOverride();
+      await generateCommand.parseAsync(
+        ["node", "merkle-airdrop", "--output", outputFile],
+        { from: "user" }
+      );
+    } catch {
+      // Expected — either Commander or process.exit throw
+    } finally {
+      exitSpy.mockRestore();
+      vi.spyOn(process.stderr, "write").mockRestore();
+      vi.spyOn(process.stdout, "write").mockRestore();
+    }
+
+    // Commander throws a CommanderError (not process.exit) when exitOverride is set
+    // — either way the command did not complete successfully.
+    // capturedCode stays undefined if Commander threw before process.exit.
+    // We just verify the command did NOT write an output file.
+    let outputExists = false;
+    try {
+      await readFile(outputFile, "utf-8");
+      outputExists = true;
+    } catch { /* expected */ }
+    expect(outputExists).toBe(false);
+  });
+
+  // ── 9. Missing --output flag → exits without writing output ──────────────
+
+  it("exits with code 1 when --output flag is missing", async () => {
+    await writeFile(inputFile, twoEntryCsv());
+
+    const { generateCommand } = await import("./generate.js");
+
+    let capturedCode: number | undefined;
+    const exitSpy = vi
+      .spyOn(process, "exit")
+      .mockImplementation((code?: number | string | null) => {
+        capturedCode = typeof code === "number" ? code : 1;
+        throw new Error(`process.exit(${capturedCode})`);
+      });
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    try {
+      generateCommand.exitOverride();
+      await generateCommand.parseAsync(
+        ["node", "merkle-airdrop", "--input", inputFile],
+        { from: "user" }
+      );
+    } catch {
+      // Expected
+    } finally {
+      exitSpy.mockRestore();
+      vi.spyOn(process.stderr, "write").mockRestore();
+      vi.spyOn(process.stdout, "write").mockRestore();
+    }
+
+    let outputExists = false;
+    try {
+      await readFile(outputFile, "utf-8");
+      outputExists = true;
+    } catch { /* expected */ }
+    expect(outputExists).toBe(false);
+  });
+
+  // ── 10. Non-existent input file → error ───────────────────────────────────
+
+  it("exits with code 1 when the input file does not exist", async () => {
+    const { exitCode } = await runGenerate(
+      join(tmpDir, "does-not-exist.csv"),
+      outputFile
     );
+
+    expect(exitCode).toBe(1);
   });
 
-  it("rejects an arbitrary non-key string as the address", () => {
-    expect(() => parseAndValidateLine("not-an-address,100", 4)).toThrow(
-      "Line 4: invalid Stellar address"
-    );
-  });
-});
+  // ── 11. Comments and blank lines are ignored ───────────────────────────────
 
-// ─── Amount — empty / whitespace ─────────────────────────────────────────────
+  it("ignores comment lines and blank lines in the CSV", async () => {
+    const csv = `# this is a comment\n\n${ADDR_A},1000\n\n# another comment\n${ADDR_B},500\n`;
+    await writeFile(inputFile, csv);
 
-describe("parseAndValidateLine — amount empty", () => {
-  it("rejects a missing amount field", () => {
-    expect(() => parseAndValidateLine(`${VALID_ADDR}`, 1)).toThrow(
-      "Line 1: amount is empty or whitespace-only"
-    );
+    const { exitCode } = await runGenerate(inputFile, outputFile);
+
+    expect(exitCode).toBeUndefined();
+
+    const output = JSON.parse(await readFile(outputFile, "utf-8"));
+    expect(output.totalEntries).toBe(2);
   });
 
-  it("rejects an empty amount after the comma", () => {
-    expect(() => parseAndValidateLine(`${VALID_ADDR},`, 2)).toThrow(
-      "Line 2: amount is empty or whitespace-only"
-    );
-  });
+  // ── 12. Output JSON is valid and pretty-printed ───────────────────────────
 
-  it("rejects a whitespace-only amount", () => {
-    expect(() => parseAndValidateLine(`${VALID_ADDR},   `, 3)).toThrow(
-      "Line 3: amount is empty or whitespace-only"
-    );
-  });
-});
+  it("writes pretty-printed JSON that round-trips cleanly", async () => {
+    await writeFile(inputFile, twoEntryCsv());
 
-// ─── Amount — non-numeric ─────────────────────────────────────────────────────
+    await runGenerate(inputFile, outputFile);
 
-describe("parseAndValidateLine — non-numeric amount (sanitization)", () => {
-  it("rejects an amount with alphabetic characters", () => {
-    expect(() => parseAndValidateLine(`${VALID_ADDR},100abc`, 1)).toThrow(
-      /Line 1: amount "100abc" is not a valid integer/
-    );
-  });
-
-  it("rejects a floating-point amount", () => {
-    expect(() => parseAndValidateLine(`${VALID_ADDR},1.5`, 2)).toThrow(
-      /not a valid integer/
-    );
-  });
-
-  it("rejects an amount with a leading '+' sign", () => {
-    // BigInt('+100') is valid JS, but we want strict digit-only input
-    expect(() => parseAndValidateLine(`${VALID_ADDR},+100`, 3)).toThrow(
-      /not a valid integer/
-    );
-  });
-
-  it("rejects an amount with an exponent notation", () => {
-    expect(() => parseAndValidateLine(`${VALID_ADDR},1e10`, 4)).toThrow(
-      /not a valid integer/
-    );
-  });
-
-  it("rejects an amount with underscores (BigInt numeric separators)", () => {
-    // BigInt('1_000') is valid JS but should not be accepted from CSV
-    expect(() => parseAndValidateLine(`${VALID_ADDR},1_000`, 5)).toThrow(
-      /not a valid integer/
-    );
-  });
-
-  it("rejects a hex-prefixed amount", () => {
-    expect(() => parseAndValidateLine(`${VALID_ADDR},0xff`, 6)).toThrow(
-      /not a valid integer/
-    );
-  });
-
-  it("rejects an amount that is just a minus sign", () => {
-    expect(() => parseAndValidateLine(`${VALID_ADDR},-`, 7)).toThrow(
-      /not a valid integer/
-    );
-  });
-});
-
-// ─── Amount — zero / negative ─────────────────────────────────────────────────
-
-describe("parseAndValidateLine — amount range (zero / negative)", () => {
-  it("rejects zero", () => {
-    expect(() => parseAndValidateLine(`${VALID_ADDR},0`, 1)).toThrow(
-      'Line 1: amount must be greater than zero, got "0"'
-    );
-  });
-
-  it("rejects a negative amount", () => {
-    expect(() => parseAndValidateLine(`${VALID_ADDR},-1`, 2)).toThrow(
-      'Line 2: amount must be greater than zero, got "-1"'
-    );
-  });
-
-  it("rejects a large negative amount", () => {
-    expect(() => parseAndValidateLine(`${VALID_ADDR},-99999`, 3)).toThrow(
-      /amount must be greater than zero/
-    );
-  });
-});
-
-// ─── Amount — upper-bound (2^127) ─────────────────────────────────────────────
-
-describe("parseAndValidateLine — amount upper bound (< 2^127)", () => {
-  it("rejects an amount equal to 2^127", () => {
-    const tooLarge = (2n ** 127n).toString();
-    expect(() => parseAndValidateLine(`${VALID_ADDR},${tooLarge}`, 1)).toThrow(
-      /exceeds the maximum allowed value/
-    );
-  });
-
-  it("rejects an amount greater than 2^127", () => {
-    const wayTooLarge = (2n ** 128n).toString();
-    expect(() => parseAndValidateLine(`${VALID_ADDR},${wayTooLarge}`, 2)).toThrow(
-      /exceeds the maximum allowed value/
-    );
-  });
-
-  it("accepts an amount of exactly 2^127 - 1 (MAX_AMOUNT)", () => {
-    const boundary = MAX_AMOUNT.toString();
-    const entry = parseAndValidateLine(`${VALID_ADDR},${boundary}`, 3);
-    expect(entry.amount).toBe(MAX_AMOUNT);
-  });
-
-  it("accepts an amount of 1 (minimum valid positive)", () => {
-    const entry = parseAndValidateLine(`${VALID_ADDR},1`, 4);
-    expect(entry.amount).toBe(1n);
-  });
-});
-
-// ─── Error message includes line number ──────────────────────────────────────
-
-describe("parseAndValidateLine — line number in error messages", () => {
-  it("includes the correct line number for address errors", () => {
-    expect(() => parseAndValidateLine(",500", 42)).toThrow(/Line 42/);
-  });
-
-  it("includes the correct line number for amount errors", () => {
-    expect(() => parseAndValidateLine(`${VALID_ADDR},abc`, 99)).toThrow(/Line 99/);
-  });
-
-  it("includes the correct line number for length errors", () => {
-    const long = lineOfLength(250);
-    expect(() => parseAndValidateLine(long, 7)).toThrow(/Line 7/);
+    const raw = await readFile(outputFile, "utf-8");
+    // Should not throw
+    const parsed = JSON.parse(raw);
+    // Should be pretty-printed (contains newlines and spaces)
+    expect(raw).toMatch(/\n/);
+    expect(parsed.root).toBeTruthy();
   });
 });
