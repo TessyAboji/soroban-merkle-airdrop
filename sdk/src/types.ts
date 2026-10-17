@@ -191,6 +191,42 @@ export interface ClaimResult {
   amount: bigint;
 }
 
+// ─── Amount formatting ───────────────────────────────────────────────────────
+
+/**
+ * Format a raw token amount into a human-readable decimal string using the
+ * token's decimal precision.
+ *
+ * For example, with `decimals = 7`:
+ * - `1_000_000_0n` → `"1.0000000"`
+ * - `15000n`       → `"0.0015000"`
+ *
+ * @param raw      - Raw token amount in base units.
+ * @param decimals - Number of decimal places (from SEP-41 `decimals()`).
+ * @returns Formatted decimal string.
+ *
+ * @example
+ * ```ts
+ * import { formatAmount } from '@soroban-merkle-airdrop/sdk';
+ *
+ * const decimals = await client.tokenDecimals();
+ * if (decimals !== null) {
+ *   console.log(formatAmount(1_000_000_0n, decimals)); // "1.0000000"
+ * }
+ * ```
+ */
+export function formatAmount(raw: bigint, decimals: number): string {
+  if (decimals === 0) return raw.toString();
+
+  const factor = 10n ** BigInt(decimals);
+  const whole = raw / factor;
+  const fraction = raw % factor;
+
+  // Pad fraction with leading zeros to fill `decimals` digits.
+  const fracStr = fraction.toString().padStart(decimals, "0");
+  return `${whole}.${fracStr}`;
+}
+
 // ─── Error types ─────────────────────────────────────────────────────────────
 
 /**
@@ -315,3 +351,68 @@ export class RpcError extends Error {
     Object.setPrototypeOf(this, RpcError.prototype);
   }
 }
+
+// ─── Contract event types ─────────────────────────────────────────────────
+
+/**
+ * Emitted by `initialize()` once the airdrop has been set up.
+ *
+ * Topic:  [Symbol("init"), admin: Address]
+ * Data:   { merkleRoot: Buffer(32), totalAmount: bigint }
+ */
+export interface InitEvent {
+  /** The admin address that initialized the airdrop. */
+  admin: string;
+  /** The 32-byte Merkle root as a hex string. */
+  merkleRoot: string;
+  /** Total tokens deposited into the contract (in base units). */
+  totalAmount: bigint;
+}
+
+/**
+ * Emitted by `claim()` each time a claimant successfully claims tokens.
+ *
+ * Topic:  [Symbol("claimed"), claimant: Address]
+ * Data:   amount: i128
+ */
+export interface ClaimedEvent {
+  /** The address that claimed tokens. */
+  claimant: string;
+  /** The amount of tokens claimed (in base units). */
+  amount: bigint;
+}
+
+/**
+ * Emitted by `reclaim()` after the admin recovers unclaimed tokens post-expiry.
+ *
+ * Topic:  [Symbol("reclaimed"), admin: Address]
+ * Data:   balance: i128
+ */
+export interface ReclaimedEvent {
+  /** The admin address that reclaimed the tokens. */
+  admin: string;
+  /** The token balance reclaimed (in base units). */
+  balance: bigint;
+}
+
+/**
+ * Emitted by `set_active()` whenever the airdrop is paused or unpaused.
+ *
+ * Note: the on-chain event symbol is `"paused"` (not `"set_active"`).
+ *
+ * Topic:  [Symbol("paused"), admin: Address]
+ * Data:   active: bool
+ */
+export interface PausedEvent {
+  /** The admin address that changed the active state. */
+  admin: string;
+  /** The new active state: `true` = active (unpaused), `false` = paused. */
+  active: boolean;
+}
+
+/** Union of all events the airdrop contract can emit. */
+export type AirdropEvent =
+  | { type: "init";      data: InitEvent     }
+  | { type: "claimed";   data: ClaimedEvent  }
+  | { type: "reclaimed"; data: ReclaimedEvent }
+  | { type: "paused";    data: PausedEvent   };

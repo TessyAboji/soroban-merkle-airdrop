@@ -28,7 +28,7 @@ import { resolve } from "path";
 import chalk from "chalk";
 import ora from "ora";
 import { StrKey } from "@stellar/stellar-sdk";
-import { buildMerkleTree } from "@soroban-merkle-airdrop/sdk";
+import { buildMerkleTree, formatAmount } from "@soroban-merkle-airdrop/sdk";
 import type { AirdropEntry } from "@soroban-merkle-airdrop/sdk";
 
 /**
@@ -104,8 +104,13 @@ export function makeGenerateCommand(): Command {
     .description("Build a Merkle tree from a CSV airdrop list")
     .requiredOption("-i, --input <file>", "CSV file: address,amount (one per line)")
     .requiredOption("-o, --output <file>", "Output JSON file for Merkle tree + proofs")
+    .requiredOption(
+      "-c, --contract-id <address>",
+      "Deployed airdrop contract address (C...) — included as domain separator in leaf hashes"
+    )
     .option("--has-header", "Force-skip the first data row as a CSV header")
     .option("--json", "Print tree JSON to stdout instead of writing to --output (suppresses spinner)")
+    .option("--decimals <n>", "Token decimal places for human-readable amount display (e.g. 7 for XLM)")
     .action(async (opts) => {
       const jsonMode: boolean = opts.json ?? false;
 
@@ -171,12 +176,16 @@ export function makeGenerateCommand(): Command {
         }
 
         (spinner as { text: string }).text = `Building Merkle tree for ${entries.length} entries...`;
-        const { root, proofs } = buildMerkleTree(entries);
+        const { root, proofs } = buildMerkleTree(opts.contractId as string, entries);
+
+        const totalRaw = entries.reduce((s, e) => s + e.amount, 0n);
+        const decimals: number | null =
+          opts.decimals !== undefined ? parseInt(opts.decimals as string, 10) : null;
 
         const output = {
           root,
           totalEntries: entries.length,
-          totalAmount: entries.reduce((s, e) => s + e.amount, 0n).toString(),
+          totalAmount: totalRaw.toString(),
           generatedAt: new Date().toISOString(),
           proofs: Object.fromEntries(
             [...proofs.entries()].map(([addr, p]) => [
@@ -196,6 +205,16 @@ export function makeGenerateCommand(): Command {
         (spinner as ReturnType<typeof ora>).succeed(chalk.green(`Merkle tree generated!`));
         console.log(`\n  ${chalk.bold("Root:")}    ${chalk.cyan(root)}`);
         console.log(`  ${chalk.bold("Entries:")} ${entries.length}`);
+
+        // Issue #58: show formatted total when --decimals is provided.
+        if (decimals !== null && !isNaN(decimals)) {
+          console.log(
+            `  ${chalk.bold("Total:")}   ${formatAmount(totalRaw, decimals)} (${totalRaw.toString()} raw)`
+          );
+        } else {
+          console.log(`  ${chalk.bold("Total:")}   ${totalRaw.toString()}`);
+        }
+
         console.log(`  ${chalk.bold("Output:")}  ${opts.output}\n`);
       } catch (err) {
         (spinner as { fail: (msg: string) => void }).fail(`Error: ${(err as Error).message}`);
