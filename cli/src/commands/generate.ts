@@ -29,21 +29,54 @@ function isValidStellarAddress(addr: string): boolean {
 }
 
 /**
+ * Maximum allowed length (characters) for a single CSV line.
+ * Lines exceeding this limit are rejected to prevent resource exhaustion
+ * from pathologically large inputs.
+ */
+export const MAX_LINE_LENGTH = 200;
+
+/**
+ * Maximum allowed amount value: 2^127 - 1 (max i128 on Soroban).
+ * Amounts at or above 2^127 cannot be stored in the contract.
+ */
+export const MAX_AMOUNT = (2n ** 127n) - 1n;
+
+/**
+ * Regex that matches a valid decimal integer string:
+ *   - Optional leading minus sign
+ *   - One or more ASCII digits
+ *   - No whitespace, separators, exponents, or other characters
+ */
+const NUMERIC_RE = /^-?\d+$/;
+
+/**
  * Parse and validate a single CSV data line.
  * Returns an `AirdropEntry` on success, or throws an Error with a human-readable
  * message that includes the 1-based line number within the original file.
+ *
+ * Validation order:
+ *   1. Line length ≤ MAX_LINE_LENGTH characters
+ *   2. Address is non-empty and a valid Stellar strkey
+ *   3. Amount is non-empty, numeric-only, > 0, and < 2^127
  *
  * @param rawLine  - The original untrimmed CSV line (for error context).
  * @param lineNum  - 1-based line number in the source file (used in error messages).
  */
 export function parseAndValidateLine(rawLine: string, lineNum: number): AirdropEntry {
+  // 1. Reject lines that are too long before doing any further parsing.
+  if (rawLine.length > MAX_LINE_LENGTH) {
+    throw new Error(
+      `Line ${lineNum}: line too long (${rawLine.length} chars, max ${MAX_LINE_LENGTH})`
+    );
+  }
+
   const trimmed = rawLine.trim();
 
   const parts = trimmed.split(",");
   const address = parts[0]?.trim() ?? "";
   const amountRaw = parts[1]?.trim() ?? "";
 
-  // Validate address
+  // 2. Validate address
   if (!address) {
     throw new Error(`Line ${lineNum}: address is empty`);
   }
@@ -51,20 +84,34 @@ export function parseAndValidateLine(rawLine: string, lineNum: number): AirdropE
     throw new Error(`Line ${lineNum}: invalid Stellar address "${address}"`);
   }
 
-  // Validate amount — must be present and non-whitespace
+  // 3. Validate amount
+
+  // Must be present and non-whitespace
   if (!amountRaw) {
     throw new Error(`Line ${lineNum}: amount is empty or whitespace-only`);
   }
 
-  let amount: bigint;
-  try {
-    amount = BigInt(amountRaw);
-  } catch {
-    throw new Error(`Line ${lineNum}: amount "${amountRaw}" is not a valid integer`);
+  // Must contain only digits (optionally preceded by a minus sign).
+  // This check happens *before* BigInt() so we get a clear error message
+  // instead of "SyntaxError: Cannot convert X to a BigInt".
+  if (!NUMERIC_RE.test(amountRaw)) {
+    throw new Error(
+      `Line ${lineNum}: amount "${amountRaw}" is not a valid integer (only digits are allowed)`
+    );
   }
+
+  // Safe to call BigInt() now — we know the string is syntactically valid.
+  const amount = BigInt(amountRaw);
 
   if (amount <= 0n) {
     throw new Error(`Line ${lineNum}: amount must be greater than zero, got "${amountRaw}"`);
+  }
+
+  // Upper bound: must fit in a Soroban i128 (< 2^127)
+  if (amount > MAX_AMOUNT) {
+    throw new Error(
+      `Line ${lineNum}: amount "${amountRaw}" exceeds the maximum allowed value (2^127 - 1)`
+    );
   }
 
   return { address, amount };
