@@ -77,6 +77,17 @@ jobs:
             --expiration ${{ inputs.expiration }}
       - name: Print result
         run: |
+          {
+            echo "## Deployment Summary"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Contract ID | \`${{ steps.deploy.outputs.contract_id }}\` |"
+            echo "| WASM hash | \`${{ steps.upload.outputs.wasm_hash }}\` |"
+            echo "| Network | ${{ inputs.network }} |"
+            echo "| Initialized at | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
+            echo "| Merkle root | \`${{ inputs.merkle_root }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
           echo "Contract ID: ${{ steps.deploy.outputs.contract_id }}"
           echo "WASM hash:   ${{ steps.upload.outputs.wasm_hash }}"
           echo "Network:     ${{ inputs.network }}"
