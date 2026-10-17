@@ -39,6 +39,9 @@ pub enum AirdropError {
     ZeroAmount = 6,
     /// `reclaim()` called before the expiration timestamp has been reached.
     NotYetExpired = 7,
+    /// The token address supplied to `initialize` does not implement SEP-41
+    /// (i.e. it does not expose a `decimals()` entry-point).
+    InvalidToken = 9,
 }
 
 /// A single recipient's allocation inside a batch claim.

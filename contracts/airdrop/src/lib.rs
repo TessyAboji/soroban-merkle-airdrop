@@ -102,9 +102,17 @@ impl AirdropContract {
 
         admin.require_auth();
 
-        // Transfer tokens from admin into the contract.
+        // Validate that `token` is a SEP-41 contract by calling its read-only
+        // `decimals()` entry-point.  If the address is not a deployed SEP-41
+        // contract, `try_decimals()` returns an `Err` and we surface
+        // `InvalidToken` instead of letting a cryptic host error escape.
         let token_client = TokenClient::new(&env, &token);
-        token_client.transfer(&admin, env.current_contract_address(), &total_amount);
+        token_client
+            .try_decimals()
+            .map_err(|_| AirdropError::InvalidToken)?;
+
+        // Transfer tokens from admin into the contract.
+        token_client.transfer(&admin, &env.current_contract_address(), &total_amount);
 
         env.storage()
             .instance()

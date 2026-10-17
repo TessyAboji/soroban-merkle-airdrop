@@ -330,6 +330,54 @@ fn test_double_initialize_fails() {
     assert_eq!(result, Err(Ok(AirdropError::AlreadyInitialized)));
 }
 
+// ─── Issue #60: SEP-41 token validation ────────────────────────────────────
+
+/// Passing the airdrop contract itself as the token (it has no `decimals()`
+/// entry-point) must return `InvalidToken` and NOT store any state.
+#[test]
+fn test_initialize_invalid_token_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    // Use another airdrop contract as the "token" — it has no decimals().
+    let fake_token = env.register(AirdropContract, ());
+    let contract_id = env.register(AirdropContract, ());
+    let client = AirdropContractClient::new(&env, &contract_id);
+
+    let claimant = Address::generate(&env);
+    let (root, _, _) = build_two_leaf_tree(&env, &claimant, 1000, &admin, 500);
+
+    let result = client.try_initialize(&admin, &fake_token, &root, &1500, &DEFAULT_EXPIRATION);
+    assert_eq!(
+        result,
+        Err(Ok(AirdropError::InvalidToken)),
+        "a non-SEP-41 address must return InvalidToken"
+    );
+
+    // No state must have been written.
+    assert_eq!(
+        client.token(),
+        None,
+        "token must not be stored when InvalidToken is returned"
+    );
+}
+
+/// Passing a valid Stellar Asset Contract (SAC) must succeed.
+#[test]
+fn test_initialize_valid_sac_succeeds() {
+    let (env, admin, token, contract_id) = setup();
+    let client = AirdropContractClient::new(&env, &contract_id);
+    let claimant = Address::generate(&env);
+
+    let (root, _, _) = build_two_leaf_tree(&env, &claimant, 1000, &admin, 500);
+    mint(&env, &token, &admin, &admin, 1500);
+
+    // A real SAC implements decimals() — initialize must not return InvalidToken.
+    client.initialize(&admin, &token, &root, &1500, &DEFAULT_EXPIRATION);
+    assert_eq!(client.token(), Some(token.clone()));
+}
+
 #[test]
 fn test_zero_amount_claim_fails() {
     let (env, admin, token, contract_id) = setup();
