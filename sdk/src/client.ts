@@ -136,6 +136,29 @@ export function createAirdropClient(config: NetworkConfig) {
   }
 
   /**
+   * Fetch the total tokens distributed through successful claims.
+   *
+   * This metric starts at 0 when the airdrop is initialised and grows
+   * by the claimed amount with every successful `claim`, `claim_for`, or
+   * `batch_claim` entry. Use it alongside {@link totalDeposited} to
+   * calculate a progress ratio for dashboards.
+   *
+   * @returns Total claimed amount in base units (stroops for XLM-based tokens).
+   *
+   * @example
+   * ```ts
+   * const claimed = await client.totalClaimed();
+   * const total = await client.totalDeposited();
+   * const pct = Number(claimed * 100n / total);
+   * console.log(`${pct}% of tokens claimed`);
+   * ```
+   */
+  async function totalClaimed(): Promise<bigint> {
+    const result = await simulateRead(contractInst.call("total_claimed"));
+    return BigInt(scValToNative(result) as number);
+  }
+
+  /**
    * Fetch the expiration timestamp (Unix seconds) after which unclaimed tokens
    * can be reclaimed by the admin.
    *
@@ -587,6 +610,7 @@ export function createAirdropClient(config: NetworkConfig) {
     isActive,
     merkleRoot,
     totalDeposited,
+    totalClaimed,
     expiration,
     remainingBalance,
     tokenDecimals,
