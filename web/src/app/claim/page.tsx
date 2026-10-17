@@ -97,6 +97,14 @@ export default function ClaimPage() {
   const [message, setMessage] = useState("");
   const [txHash, setTxHash] = useState("");
 
+  // ── #128: Progress tracking ──────────────────────────────────────────────
+  /** Total tokens deposited in the airdrop contract. */
+  const [totalDeposited, setTotalDeposited] = useState<bigint | null>(null);
+  /** Total tokens distributed via successful claims. */
+  const [totalClaimed, setTotalClaimed] = useState<bigint | null>(null);
+  /** Increment to trigger progress refresh. */
+  const [progressKey, setProgressKey] = useState(0);
+
   // ── #77: Expiration state ────────────────────────────────────────────────
   /** Unix timestamp (seconds) when the airdrop expires, or null if unknown. */
   const [expirationTs, setExpirationTs] = useState<bigint | null>(null);
@@ -144,6 +152,26 @@ export default function ClaimPage() {
       cancelled = true;
     };
   }, [contractId, network]);
+
+  // ── #128: Fetch progress on mount and after successful claims ────────────
+  useEffect(() => {
+    if (!contractId) return;
+    let cancelled = false;
+
+    const client = createAirdropClient({ ...NETWORKS[network], contractId });
+    Promise.all([client.totalDeposited(), client.totalClaimed()])
+      .then(([deposited, claimed]) => {
+        if (!cancelled) {
+          setTotalDeposited(deposited);
+          setTotalClaimed(claimed);
+        }
+      })
+      .catch(() => {
+        // Non-fatal
+      });
+
+    return () => { cancelled = true; };
+  }, [contractId, network, progressKey]);
 
   // ── #78: Derived loading flag ──────────────────────────────────────────
   const isLoading = status === "checking" || status === "claiming";
@@ -314,6 +342,8 @@ export default function ClaimPage() {
       setTxHash(result.txHash);
       setStatus("success");
       setMessage(`Successfully claimed ${result.amount.toString()} tokens!`);
+      // Trigger progress bar refresh after a successful claim.
+      setProgressKey((k) => k + 1);
     } catch (err) {
       setStatus("error");
       setMessage((err as Error).message);
@@ -350,9 +380,66 @@ export default function ClaimPage() {
       <style>{spinnerStyles}</style>
 
       <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 8 }}>Check &amp; Claim</h1>
-      <p style={{ color: "#888", marginBottom: 32 }}>
+      <p style={{ color: "#888", marginBottom: totalDeposited !== null ? 16 : 32 }}>
         Connect your Freighter wallet to check eligibility and claim your tokens.
       </p>
+
+      {/* ── #128: Progress bar ── */}
+      {totalDeposited !== null && totalClaimed !== null && (
+        <div
+          aria-label="Airdrop progress"
+          style={{
+            border: "1px solid #222",
+            borderRadius: 10,
+            padding: "16px 20px",
+            background: "#111",
+            marginBottom: 24,
+          }}
+        >
+          {(() => {
+            const pct =
+              totalDeposited > 0n
+                ? Number((totalClaimed * 10000n) / totalDeposited) / 100
+                : 0;
+            return (
+              <>
+                <div
+                  role="progressbar"
+                  aria-valuenow={pct}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-label={`${pct.toFixed(1)}% of tokens claimed`}
+                  style={{
+                    background: "#1a1a1a",
+                    borderRadius: 6,
+                    height: 14,
+                    overflow: "hidden",
+                    marginBottom: 8,
+                    border: "1px solid #333",
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${Math.min(100, pct)}%`,
+                      height: "100%",
+                      background: pct >= 100 ? "#4caf50" : "#8ae4ff",
+                      borderRadius: 6,
+                      transition: "width 0.4s ease",
+                      minWidth: pct > 0 ? 3 : 0,
+                    }}
+                  />
+                </div>
+                <p style={{ margin: 0, fontSize: 12, color: "#aaa" }}>
+                  <strong style={{ color: "#ededed" }}>{totalClaimed.toLocaleString()}</strong>
+                  {" "}tokens claimed out of{" "}
+                  <strong style={{ color: "#ededed" }}>{totalDeposited.toLocaleString()}</strong>
+                  {" "}total ({pct.toFixed(1)}%)
+                </p>
+              </>
+            );
+          })()}
+        </div>
+      )}
 
       {/* ── #77: Expired banner ── */}
       {isExpired && (
