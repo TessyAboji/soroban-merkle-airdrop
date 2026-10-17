@@ -28,7 +28,7 @@
 //! - `DataKey::TotalDeposited`      → `i128`        (instance)
 //! - `DataKey::Active`              → `bool`        (instance)
 //! - `DataKey::Expiration`          → `u64`         (instance)
-//! - `DataKey::TotalClaimed`         → `i128`        (instance)
+//! - `DataKey::ClaimedCount`          → `u32`           (instance)
 //! - `DataKey::Claimed(addr)`       → `bool`        (persistent, per claimant)
 
 #![no_std]
@@ -43,7 +43,7 @@ use soroban_sdk::{
     contract, contractimpl, contractmeta, symbol_short, token::Client as TokenClient, Address,
     BytesN, Env, Vec,
 };
-use types::{AirdropEntry, AirdropError, DataKey};
+use types::{AirdropEntry, AirdropError, ContractInfo, DataKey};
 
 contractmeta!(
     key = "Description",
@@ -51,11 +51,18 @@ contractmeta!(
 );
 contractmeta!(key = "Version", val = "0.1.0");
 
-/// TTL for per-claimant `Claimed` entries — ~2 years of ledgers.
+/// Default TTL for per-claimant `Claimed` entries — ~2 years of ledgers.
+///
+/// Ledger calculation: Stellar produces approximately 1 ledger every 5 seconds.
+/// 12_614_400 ledgers × 5 s/ledger = 63_072_000 s ≈ 2 years.
+/// Configurable via the `claimed_ttl` parameter in `initialize()`.
 const CLAIMED_TTL: u32 = 12_614_400;
 const CLAIMED_TTL_THRESHOLD: u32 = CLAIMED_TTL / 2;
 
-/// TTL for instance storage — ~2 years of ledgers (same magnitude as CLAIMED_TTL).
+/// Default TTL for instance storage — ~2 years of ledgers (same magnitude as CLAIMED_TTL).
+///
+/// Ledger calculation: 12_614_400 ledgers × 5 s/ledger = 63_072_000 s ≈ 2 years.
+/// Configurable via the `instance_ttl` parameter in `initialize()`.
 const INSTANCE_TTL: u32 = 12_614_400;
 const INSTANCE_TTL_THRESHOLD: u32 = INSTANCE_TTL / 2;
 
@@ -86,6 +93,11 @@ impl AirdropContract {
     /// * `total_amount` - Total tokens to be distributed; transferred from admin.
     /// * `expiration`   - Unix timestamp (seconds) after which `reclaim()` is
     ///                    permitted. Must be in the future relative to deployment.
+    /// * `claimed_ttl`  - Optional TTL (ledgers) for per-claimant `Claimed` entries.
+    ///                    Defaults to [`CLAIMED_TTL`] (~2 years) when `None`.
+    ///                    Ledger ≈ 5 s; 12_614_400 × 5 s ≈ 2 years.
+    /// * `instance_ttl` - Optional TTL (ledgers) for instance storage.
+    ///                    Defaults to [`INSTANCE_TTL`] (~2 years) when `None`.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -93,6 +105,8 @@ impl AirdropContract {
         merkle_root: BytesN<32>,
         total_amount: i128,
         expiration: u64,
+        claimed_ttl: Option<u32>,
+        instance_ttl: Option<u32>,
     ) -> Result<(), AirdropError> {
         if env.storage().instance().has(&DataKey::MerkleRoot) {
             return Err(AirdropError::AlreadyInitialized);
@@ -100,8 +114,15 @@ impl AirdropContract {
         if total_amount <= 0 {
             return Err(AirdropError::ZeroAmount);
         }
+        if expiration <= env.ledger().timestamp() {
+            return Err(AirdropError::ExpirationInPast);
+        }
 
         admin.require_auth();
+
+        // Resolve TTLs — use caller-supplied values or fall back to defaults.
+        let c_ttl = claimed_ttl.unwrap_or(CLAIMED_TTL);
+        let i_ttl = instance_ttl.unwrap_or(INSTANCE_TTL);
 
         // Transfer tokens from admin into the contract.
         let token_client = TokenClient::new(&env, &token);
@@ -119,6 +140,8 @@ impl AirdropContract {
         env.storage()
             .instance()
             .set(&DataKey::Expiration, &expiration);
+        env.storage().instance().set(&DataKey::ClaimedTtl, &c_ttl);
+        env.storage().instance().set(&DataKey::InstanceTtl, &i_ttl);
 
         env.events()
             .publish((symbol_short!("init"), admin), (merkle_root, total_amount));
@@ -133,6 +156,18 @@ impl AirdropContract {
     /// The claimant provides their allocation `amount` and a Merkle `proof`
     /// demonstrating they are in the distribution tree. Tokens are transferred
     /// immediately on success.
+    ///
+    /// # Expiration and claim deadline
+    ///
+    /// This contract has **no claim deadline**. The `expiration` field is a
+    /// gate for `reclaim()` only — it lets the admin recover unclaimed tokens
+    /// after the distribution window closes. Claims remain valid at any
+    /// ledger timestamp, including timestamps past the expiration, as long as
+    /// the contract still holds tokens.
+    ///
+    /// Once the admin calls `reclaim()` after expiry the contract balance
+    /// becomes zero. Any subsequent `claim` will panic when the underlying
+    /// SEP-41 token contract rejects the transfer due to insufficient balance.
     ///
     /// # Arguments
     ///
@@ -399,13 +434,18 @@ impl AirdropContract {
     /// Soroban's state-archival mechanism can archive instance storage once its
     /// TTL reaches zero, making the contract inaccessible. This public function
     /// lets *anyone* pay to restore the contract by extending instance TTL back
-    /// to `INSTANCE_TTL` ledgers — no admin authentication required.
+    /// to the configured `instance_ttl` ledgers — no admin authentication required.
     ///
     /// See: <https://developers.stellar.org/docs/learn/encyclopedia/storage/state-archival>
     pub fn restore(env: Env) {
+        let i_ttl = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::InstanceTtl)
+            .unwrap_or(INSTANCE_TTL);
         env.storage()
             .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+            .extend_ttl(i_ttl / 2, i_ttl);
     }
 
     /// Reclaim unclaimed tokens after the airdrop expires. Admin only.
@@ -442,8 +482,11 @@ impl AirdropContract {
             token_client.transfer(&env.current_contract_address(), &admin, &balance);
         }
 
+        // Emit enriched event: topic = ("reclaimed", admin), data = (balance, expiration).
+        // Including `expiration` lets indexers correlate reclaim events with the
+        // airdrop window and track reclaim history without a separate state query.
         env.events()
-            .publish((symbol_short!("reclaimed"), admin), balance);
+            .publish((symbol_short!("reclaimed"), admin), (balance, expiration));
 
         Ok(balance)
     }
@@ -455,9 +498,7 @@ impl AirdropContract {
     /// Refreshes instance storage TTL so dormant airdrops with no new claims
     /// do not have their on-chain data archived.
     pub fn merkle_root(env: Env) -> Option<BytesN<32>> {
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+        extend_instance_ttl(&env);
         env.storage().instance().get(&DataKey::MerkleRoot)
     }
 
@@ -471,9 +512,7 @@ impl AirdropContract {
     /// causes `is_claimed()` to return `false`, which would allow a
     /// double-claim after the entry is archived.
     pub fn is_claimed(env: Env, claimant: Address) -> bool {
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+        extend_instance_ttl(&env);
 
         let key = DataKey::Claimed(claimant);
         let exists = env.storage().persistent().has(&key);
@@ -481,9 +520,10 @@ impl AirdropContract {
         // Refresh the persistent Claimed entry TTL so it cannot archive while
         // the airdrop is live, which would silently allow a double-claim.
         if exists {
+            let c_ttl = get_claimed_ttl(&env);
             env.storage()
                 .persistent()
-                .extend_ttl(&key, CLAIMED_TTL_THRESHOLD, CLAIMED_TTL);
+                .extend_ttl(&key, c_ttl / 2, c_ttl);
         }
 
         exists
@@ -494,9 +534,7 @@ impl AirdropContract {
     /// Refreshes instance storage TTL so dormant airdrops with no new claims
     /// do not have their on-chain data archived.
     pub fn is_active(env: Env) -> bool {
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+        extend_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::Active)
@@ -508,9 +546,7 @@ impl AirdropContract {
     /// Refreshes instance storage TTL so dormant airdrops with no new claims
     /// do not have their on-chain data archived.
     pub fn token(env: Env) -> Option<Address> {
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+        extend_instance_ttl(&env);
         env.storage().instance().get(&DataKey::TokenAddress)
     }
 
@@ -519,9 +555,7 @@ impl AirdropContract {
     /// Refreshes instance storage TTL so dormant airdrops with no new claims
     /// do not have their on-chain data archived.
     pub fn admin(env: Env) -> Option<Address> {
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+        extend_instance_ttl(&env);
         env.storage().instance().get(&DataKey::Admin)
     }
 
@@ -530,9 +564,7 @@ impl AirdropContract {
     /// Refreshes instance storage TTL so dormant airdrops with no new claims
     /// do not have their on-chain data archived.
     pub fn total_deposited(env: Env) -> i128 {
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+        extend_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::TotalDeposited)
@@ -561,10 +593,65 @@ impl AirdropContract {
     /// Refreshes instance storage TTL so dormant airdrops with no new claims
     /// do not have their on-chain data archived.
     pub fn expiration(env: Env) -> Option<u64> {
+        extend_instance_ttl(&env);
+        env.storage().instance().get(&DataKey::Expiration)
+    }
+
+    /// Return the number of successful claims so far.
+    ///
+    /// Refreshes instance storage TTL so dormant airdrops with no new claims
+    /// do not have their on-chain data archived.
+    pub fn claimed_count(env: Env) -> u32 {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
-        env.storage().instance().get(&DataKey::Expiration)
+        env.storage()
+            .instance()
+            .get(&DataKey::ClaimedCount)
+            .unwrap_or(0)
+    }
+
+    /// Return all contract instance state in a single call.
+    ///
+    /// Returns `None` if the contract has not been initialised yet, and
+    /// `Some(ContractInfo)` otherwise. This lets clients avoid 5–6 separate
+    /// RPC simulation calls to read individual fields.
+    ///
+    /// Refreshes instance storage TTL so dormant airdrops do not get archived.
+    pub fn contract_info(env: Env) -> Option<ContractInfo> {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+
+        // Use MerkleRoot as the sentinel for initialisation.
+        let merkle_root: BytesN<32> = env.storage().instance().get(&DataKey::MerkleRoot)?;
+
+        let admin: Address = env.storage().instance().get(&DataKey::Admin)?;
+        let token: Address = env.storage().instance().get(&DataKey::TokenAddress)?;
+        let total_deposited: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalDeposited)
+            .unwrap_or(0);
+        let active: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Active)
+            .unwrap_or(false);
+        let expiration: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Expiration)
+            .unwrap_or(0);
+
+        Some(ContractInfo {
+            admin,
+            token,
+            merkle_root,
+            total_deposited,
+            active,
+            expiration,
+        })
     }
 }
 
@@ -583,9 +670,7 @@ fn claim_entry(
     proof: &Vec<BytesN<32>>,
 ) -> Result<(), AirdropError> {
     // Extend instance storage TTL so core contract data doesn't expire.
-    env.storage()
-        .instance()
-        .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+    extend_instance_ttl(env);
 
     // Check active.
     let active: bool = env
@@ -614,17 +699,18 @@ fn claim_entry(
         .get(&DataKey::MerkleRoot)
         .ok_or(AirdropError::NotInitialized)?;
 
-    let leaf = merkle::leaf_hash(env, claimant, amount);
+    let leaf = merkle::leaf_hash(env, &env.current_contract_address(), claimant, amount);
 
     if !merkle::verify_proof(env, &root, leaf, proof) {
         return Err(AirdropError::InvalidProof);
     }
 
     // Mark as claimed before transfer (re-entrancy guard).
+    let c_ttl = get_claimed_ttl(env);
     env.storage().persistent().set(&claimed_key, &true);
     env.storage()
         .persistent()
-        .extend_ttl(&claimed_key, CLAIMED_TTL_THRESHOLD, CLAIMED_TTL);
+        .extend_ttl(&claimed_key, c_ttl / 2, c_ttl);
 
     // Transfer tokens to claimant.
     let token: Address = env
@@ -652,4 +738,30 @@ fn claim_entry(
         .publish((symbol_short!("claimed"), claimant.clone()), amount);
 
     Ok(())
+}
+
+// ─── TTL helpers ──────────────────────────────────────────────────────────────
+
+/// Read the configured claimed-entry TTL from instance storage, falling back
+/// to the compile-time default [`CLAIMED_TTL`] if not set.
+fn get_claimed_ttl(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get::<_, u32>(&DataKey::ClaimedTtl)
+        .unwrap_or(CLAIMED_TTL)
+}
+
+/// Read the configured instance-storage TTL from instance storage, falling back
+/// to the compile-time default [`INSTANCE_TTL`] if not set.
+fn get_instance_ttl(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get::<_, u32>(&DataKey::InstanceTtl)
+        .unwrap_or(INSTANCE_TTL)
+}
+
+/// Extend instance storage TTL using the configured (or default) value.
+fn extend_instance_ttl(env: &Env) {
+    let i_ttl = get_instance_ttl(env);
+    env.storage().instance().extend_ttl(i_ttl / 2, i_ttl);
 }
