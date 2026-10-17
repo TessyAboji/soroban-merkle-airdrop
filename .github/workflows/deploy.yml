@@ -36,8 +36,14 @@ jobs:
       - name: Build WASM
         run: cargo build --manifest-path contracts/airdrop/Cargo.toml --target wasm32v1-none --release
       - name: Install Stellar CLI
+        # Pinned to a specific release to prevent silent breakage from new CLI versions.
+        # To update: change STELLAR_CLI_VERSION to the desired tag from
+        # https://github.com/stellar/stellar-cli/releases, then test the deploy
+        # workflow manually on testnet before merging.
+        env:
+          STELLAR_CLI_VERSION: "v21.4.1"
         run: |
-          curl -L https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          curl -L "https://github.com/stellar/stellar-cli/releases/download/${STELLAR_CLI_VERSION}/stellar-cli-x86_64-unknown-linux-gnu.tar.gz" | tar xz
           sudo mv stellar /usr/local/bin/
       - name: Configure identity
         run: echo "${{ secrets.DEPLOYER_SECRET_KEY }}" | stellar keys add deployer --secret-key
