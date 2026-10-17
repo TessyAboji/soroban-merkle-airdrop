@@ -28,6 +28,7 @@
 //! - `DataKey::TotalDeposited`      → `i128`        (instance)
 //! - `DataKey::Active`              → `bool`        (instance)
 //! - `DataKey::Expiration`          → `u64`         (instance)
+//! - `DataKey::TotalClaimed`         → `i128`        (instance)
 //! - `DataKey::Claimed(addr)`       → `bool`        (persistent, per claimant)
 
 #![no_std]
@@ -538,6 +539,23 @@ impl AirdropContract {
             .unwrap_or(0)
     }
 
+    /// Return the sum of all tokens transferred via successful claims.
+    ///
+    /// Starts at 0 and grows by the claimed amount with each successful
+    /// `claim`, `claim_for`, or `batch_claim` entry.
+    ///
+    /// Refreshes instance storage TTL so dormant airdrops with no new claims
+    /// do not have their on-chain data archived.
+    pub fn total_claimed(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalClaimed)
+            .unwrap_or(0)
+    }
+
     /// Return the expiration timestamp (unix seconds) after which reclaim is allowed.
     ///
     /// Refreshes instance storage TTL so dormant airdrops with no new claims
@@ -619,6 +637,16 @@ fn claim_entry(
         claimant,
         &amount,
     );
+
+    // Update TotalClaimed counter.
+    let prev_claimed: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::TotalClaimed)
+        .unwrap_or(0);
+    env.storage()
+        .instance()
+        .set(&DataKey::TotalClaimed, &(prev_claimed + amount));
 
     env.events()
         .publish((symbol_short!("claimed"), claimant.clone()), amount);

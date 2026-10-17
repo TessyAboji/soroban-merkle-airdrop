@@ -19,6 +19,8 @@ pub enum DataKey {
     Active,
     /// Unix timestamp (seconds) after which `reclaim()` is permitted.
     Expiration,
+    /// Running total of all tokens transferred via successful claims.
+    TotalClaimed,
 }
 
 /// Errors returned by the airdrop contract.
