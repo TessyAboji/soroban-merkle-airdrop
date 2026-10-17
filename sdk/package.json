@@ -14,6 +14,7 @@
     "build": "tsc",
     "test": "vitest run",
     "lint": "eslint src --ext .ts",
+    "typecheck": "tsc --noEmit",
     "docs": "typedoc"
   },
   "dependencies": {
@@ -21,6 +22,7 @@
   },
   "devDependencies": {
     "@types/node": "20.14.0",
+    "@vitest/coverage-v8": "1.6.0",
     "typescript": "5.4.5",
     "typedoc": "0.26.11",
     "vitest": "1.6.0",

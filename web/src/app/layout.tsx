@@ -7,24 +7,75 @@ export const metadata: Metadata = {
   description: "Claim your token allocation from this Merkle airdrop on Stellar.",
 };
 
+// FOUC-prevention script: runs synchronously before the first paint so the
+// correct data-theme is applied before any CSS is rendered.
+const themeScript = `(function(){
+  var theme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  document.documentElement.setAttribute('data-theme', theme);
+})();`;
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <head>
         {/* Responsive viewport meta — ensures mobile scaling */}
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {/* Blocking script — must run before any paint to prevent FOUC (#113) */}
+        {/* eslint-disable-next-line react/no-danger */}
+        <script dangerouslySetInnerHTML={{ __html: themeScript }} />
         <style>{`
+          /* ── Theme variables (#113) ──────────────────── */
+          :root[data-theme='dark'] {
+            --bg:         #0a0a0a;
+            --surface:    #111;
+            --border:     #222;
+            --border-alt: #1a1a1a;
+            --text:       #ededed;
+            --text-muted: #555;
+            --text-dim:   #888;
+            --accent:     #8ae4ff;
+            --accent-fg:  #000;
+            --success:    #4caf50;
+            --success-bg: #1a3a1a;
+            --success-bd: #2e5c2e;
+            --error:      #ff6b6b;
+            --error-bg:   #3a1a1a;
+            --error-bd:   #5c2e2e;
+            --surface-alt:#1e1e1e;
+            --border-sel: #444;
+          }
+          :root[data-theme='light'] {
+            --bg:         #f8f9fa;
+            --surface:    #ffffff;
+            --border:     #e2e8f0;
+            --border-alt: #e2e8f0;
+            --text:       #0f172a;
+            --text-muted: #475569;
+            --text-dim:   #64748b;
+            --accent:     #0891b2;
+            --accent-fg:  #ffffff;
+            --success:    #16a34a;
+            --success-bg: #dcfce7;
+            --success-bd: #86efac;
+            --error:      #dc2626;
+            --error-bg:   #fee2e2;
+            --error-bd:   #fca5a5;
+            --surface-alt:#f1f5f9;
+            --border-sel: #94a3b8;
+          }
+
           *, *::before, *::after { box-sizing: border-box; }
           body {
             margin: 0;
             font-family: system-ui, sans-serif;
-            background: #0a0a0a;
-            color: #ededed;
+            background: var(--bg);
+            color: var(--text);
             min-height: 100vh;
+            transition: background 0.2s ease, color 0.2s ease;
           }
           /* ── Nav ─────────────────────────────────────── */
           .nav {
-            border-bottom: 1px solid #222;
+            border-bottom: 1px solid var(--border);
             padding: 16px 24px;
             display: flex;
             align-items: center;
@@ -32,7 +83,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             flex-wrap: wrap;
           }
           .nav-logo {
-            color: #8ae4ff;
+            color: var(--accent);
             text-decoration: none;
             font-weight: 700;
             font-size: 18px;
@@ -41,7 +92,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             align-items: center;
           }
           .nav-tagline {
-            color: #555;
+            color: var(--text-muted);
             font-size: 13px;
             flex: 1;
           }
@@ -54,13 +105,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           }
           .network-label {
             font-size: 12px;
-            color: #888;
+            color: var(--text-dim);
             white-space: nowrap;
           }
           .network-select {
-            background: #111;
-            color: #ededed;
-            border: 1px solid #333;
+            background: var(--surface);
+            color: var(--text);
+            border: 1px solid var(--border);
             border-radius: 8px;
             padding: 6px 10px;
             font-size: 13px;
@@ -69,7 +120,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             min-width: 130px;
           }
           .network-select:focus {
-            outline: 2px solid #8ae4ff;
+            outline: 2px solid var(--accent);
             outline-offset: 2px;
           }
           /* ── Network badge ───────────────────────────── */
@@ -85,14 +136,34 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             line-height: 1.5;
           }
           .network-badge--testnet {
-            background: #1a3a1a;
-            color: #4caf50;
-            border: 1px solid #2e5c2e;
+            background: var(--success-bg);
+            color: var(--success);
+            border: 1px solid var(--success-bd);
           }
           .network-badge--mainnet {
-            background: #3a1a1a;
-            color: #ff6b6b;
-            border: 1px solid #5c2e2e;
+            background: var(--error-bg);
+            color: var(--error);
+            border: 1px solid var(--error-bd);
+          }
+          /* ── Theme toggle button (#113) ──────────────── */
+          .theme-toggle {
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 6px 10px;
+            cursor: pointer;
+            font-size: 18px;
+            line-height: 1;
+            color: var(--text);
+            min-height: 44px;
+            min-width: 44px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+          }
+          .theme-toggle:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
           }
           /* ── Main content ────────────────────────────── */
           .main-content {
@@ -104,11 +175,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           .footer {
             text-align: center;
             padding: 24px;
-            color: #555;
+            color: var(--text-muted);
             font-size: 13px;
-            border-top: 1px solid #1a1a1a;
+            border-top: 1px solid var(--border-alt);
           }
-          .footer a { color: #8ae4ff; }
+          .footer a { color: var(--accent); }
 
           /* ── Feature grid (landing page) ─────────────── */
           /* Responsive breakpoints (#79):
@@ -148,17 +219,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             padding: 12px 14px;
             margin-top: 6px;
             font-size: 14px;
-            background: #111;
-            border: 1px solid #333;
+            background: var(--surface);
+            border: 1px solid var(--border);
             border-radius: 8px;
-            color: #ededed;
+            color: var(--text);
             outline: none;
             font-family: monospace;
           }
           .claim-input:focus {
-            outline: 2px solid #8ae4ff;
+            outline: 2px solid var(--accent);
             outline-offset: 2px;
-            border-color: #8ae4ff;
+            border-color: var(--accent);
           }
           .claim-btn {
             padding: 14px 24px;
@@ -174,7 +245,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             justify-content: center;
           }
           .claim-btn:focus-visible {
-            outline: 2px solid #8ae4ff;
+            outline: 2px solid var(--accent);
             outline-offset: 2px;
           }
           .claim-btn:disabled {
@@ -185,20 +256,20 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             padding: 8px 18px;
             font-size: 13px;
             background: transparent;
-            color: #888;
-            border: 1px solid #222;
+            color: var(--text-dim);
+            border: 1px solid var(--border);
             border-radius: 8px;
             cursor: pointer;
             min-height: 44px;
           }
           .tab-btn[aria-selected="true"] {
             font-weight: 700;
-            background: #1e1e1e;
-            color: #ededed;
-            border-color: #444;
+            background: var(--surface-alt);
+            color: var(--text);
+            border-color: var(--border-sel);
           }
           .tab-btn:focus-visible {
-            outline: 2px solid #8ae4ff;
+            outline: 2px solid var(--accent);
             outline-offset: 2px;
           }
           /* URL row — stacks on mobile */
