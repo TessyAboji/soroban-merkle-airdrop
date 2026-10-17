@@ -12,10 +12,21 @@
  *   - Disabled buttons also carry aria-disabled for AT compatibility
  *   - Color contrast: all foreground/background pairs meet WCAG AA 4.5:1
  *     (#ededed on #111 ≈ 16:1, #4caf50 on #111 ≈ 5.3:1, etc.)
+ *
+ * #77: Expiration banner
+ *   - Queries expiration() on page load
+ *   - Shows "expired" banner when past expiration timestamp
+ *   - Shows "expires soon" warning within 48 hours of expiration
+ *   - Disables Claim button when expired
+ *
+ * #78: CSS loading spinner
+ *   - Pure-CSS spinner shown during status === 'checking' or 'claiming'
+ *   - Inputs disabled during loading states
+ *   - Spinner has aria-label and role="status" for accessibility
  */
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { createAirdropClient, verifyProof, NETWORKS } from "@soroban-merkle-airdrop/sdk";
 import {
   getPublicKey,
@@ -26,6 +37,45 @@ import { useNetwork } from "../context/NetworkContext";
 
 /** If set, pre-fills the tree URL input so users don't have to type it. */
 const DEFAULT_TREE_URL = process.env.NEXT_PUBLIC_MERKLE_TREE_URL ?? "";
+
+/** 48 hours in seconds */
+const WARN_THRESHOLD_SECS = 48 * 60 * 60;
+
+/** localStorage key prefix for claim history, keyed by address. */
+const CLAIM_HISTORY_PREFIX = "airdrop:claim-history:";
+
+/** A single past claim record. */
+export type ClaimRecord = {
+  txHash: string;
+  timestamp: number;
+  amount?: string;
+};
+
+/** Read claim history for an address from localStorage. */
+function readClaimHistory(address: string): ClaimRecord[] {
+  if (typeof window === "undefined" || !address) return [];
+  try {
+    const raw = window.localStorage.getItem(CLAIM_HISTORY_PREFIX + address);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as ClaimRecord[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Persist claim history for an address to localStorage. */
+function writeClaimHistory(address: string, records: ClaimRecord[]) {
+  if (typeof window === "undefined" || !address) return;
+  try {
+    window.localStorage.setItem(
+      CLAIM_HISTORY_PREFIX + address,
+      JSON.stringify(records)
+    );
+  } catch {
+    // Non-fatal: storage may be unavailable (private mode, quota, etc.)
+  }
+}
 
 export type Status =
   | "idle"
@@ -39,6 +89,37 @@ export type Status =
 
 /** Source for the merkle tree data */
 export type TreeSource = "url" | "paste";
+
+// ─── Pure-CSS spinner styles ─────────────────────────────────────────────────
+const spinnerStyles = `
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  .claim-spinner {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 3px solid rgba(138, 228, 255, 0.25);
+    border-top-color: #8ae4ff;
+    border-radius: 50%;
+    animation: spin 0.75s linear infinite;
+    vertical-align: middle;
+    margin-right: 8px;
+    flex-shrink: 0;
+  }
+`;
+
+// Map status → CSS variable name for border/text colour
+const statusVar: Record<Status, string> = {
+  idle:         "var(--text-muted)",
+  checking:     "var(--text-muted)",
+  eligible:     "var(--success)",
+  not_eligible: "var(--accent)",
+  claimed:      "var(--accent)",
+  claiming:     "var(--text-muted)",
+  success:      "var(--success)",
+  error:        "var(--error)",
+};
 
 export default function ClaimPage() {
   const { network, contractId } = useNetwork();
@@ -63,6 +144,69 @@ export default function ClaimPage() {
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
   const [txHash, setTxHash] = useState("");
+
+  // ── Claim history (persisted in localStorage, keyed by address) ──────────
+  const [claimHistory, setClaimHistory] = useState<ClaimRecord[]>([]);
+
+  // ── #77: Expiration state ────────────────────────────────────────────────
+  /** Unix timestamp (seconds) when the airdrop expires, or null if unknown. */
+  const [expirationTs, setExpirationTs] = useState<bigint | null>(null);
+  const [expirationLoading, setExpirationLoading] = useState(false);
+
+  /** True if the airdrop has already expired. */
+  const isExpired =
+    expirationTs !== null && BigInt(Math.floor(Date.now() / 1000)) > expirationTs;
+
+  /** True if expiration is within 48 hours (but not yet expired). */
+  const expiresSoon =
+    !isExpired &&
+    expirationTs !== null &&
+    expirationTs - BigInt(Math.floor(Date.now() / 1000)) <= BigInt(WARN_THRESHOLD_SECS);
+
+  /** Human-readable expiration date string. */
+  const expirationDate =
+    expirationTs !== null
+      ? new Date(Number(expirationTs) * 1000).toLocaleString(undefined, {
+          dateStyle: "long",
+          timeStyle: "short",
+        })
+      : null;
+
+  // ── Fetch expiration on mount (when contractId becomes available) ────────
+  useEffect(() => {
+    if (!contractId) return;
+
+    let cancelled = false;
+    setExpirationLoading(true);
+
+    createAirdropClient({ ...NETWORKS[network], contractId })
+      .expiration()
+      .then((ts) => {
+        if (!cancelled) setExpirationTs(ts);
+      })
+      .catch(() => {
+        // Non-fatal: expiration display is best-effort
+      })
+      .finally(() => {
+        if (!cancelled) setExpirationLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [contractId, network]);
+
+  // ── Load claim history whenever the connected address changes ────────────
+  useEffect(() => {
+    if (!walletAddress) {
+      setClaimHistory([]);
+      return;
+    }
+    setClaimHistory(readClaimHistory(walletAddress));
+  }, [walletAddress]);
+
+  // ── #78: Derived loading flag ──────────────────────────────────────────
+  const isLoading = status === "checking" || status === "claiming";
 
   // ─── Connect Wallet (Freighter) ─────────────────────────────────────────────
 
@@ -214,7 +358,7 @@ export default function ClaimPage() {
       };
 
       // Verify proof locally before submitting
-      if (!verifyProof(treeData.root as string, proof.address, proof.amount, proof.proof)) {
+      if (!verifyProof(treeData.root as string, contractId, proof.address, proof.amount, proof.proof)) {
         throw new Error("Proof verification failed — file may be corrupted or from a different airdrop");
       }
 
@@ -230,10 +374,29 @@ export default function ClaimPage() {
       setTxHash(result.txHash);
       setStatus("success");
       setMessage(`Successfully claimed ${result.amount.toString()} tokens!`);
+
+      // Persist this successful claim to localStorage keyed by address
+      const record: ClaimRecord = {
+        txHash: result.txHash,
+        timestamp: Date.now(),
+        amount: result.amount.toString(),
+      };
+      const existing = readClaimHistory(walletAddress.trim());
+      const updated = [record, ...existing];
+      writeClaimHistory(walletAddress.trim(), updated);
+      setClaimHistory(updated);
     } catch (err) {
       setStatus("error");
       setMessage((err as Error).message);
     }
+  }
+
+  // ─── Clear claim history for the connected address ──────────────────────────
+
+  function handleClearHistory() {
+    if (!walletAddress) return;
+    writeClaimHistory(walletAddress.trim(), []);
+    setClaimHistory([]);
   }
 
   const statusBorderColor: Record<Status, string> = {
@@ -262,10 +425,141 @@ export default function ClaimPage() {
 
   return (
     <div>
+      {/* ── Inject pure-CSS spinner keyframes ── */}
+      <style>{spinnerStyles}</style>
+
       <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 8 }}>Check &amp; Claim</h1>
-      <p style={{ color: "#888", marginBottom: 32 }}>
+      <p style={{ color: "#888", marginBottom: totalDeposited !== null ? 16 : 32 }}>
         Connect your Freighter wallet to check eligibility and claim your tokens.
       </p>
+
+      {/* ── #128: Progress bar ── */}
+      {totalDeposited !== null && totalClaimed !== null && (
+        <div
+          aria-label="Airdrop progress"
+          style={{
+            border: "1px solid #222",
+            borderRadius: 10,
+            padding: "16px 20px",
+            background: "#111",
+            marginBottom: 24,
+          }}
+        >
+          {(() => {
+            const pct =
+              totalDeposited > 0n
+                ? Number((totalClaimed * 10000n) / totalDeposited) / 100
+                : 0;
+            return (
+              <>
+                <div
+                  role="progressbar"
+                  aria-valuenow={pct}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-label={`${pct.toFixed(1)}% of tokens claimed`}
+                  style={{
+                    background: "#1a1a1a",
+                    borderRadius: 6,
+                    height: 14,
+                    overflow: "hidden",
+                    marginBottom: 8,
+                    border: "1px solid #333",
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${Math.min(100, pct)}%`,
+                      height: "100%",
+                      background: pct >= 100 ? "#4caf50" : "#8ae4ff",
+                      borderRadius: 6,
+                      transition: "width 0.4s ease",
+                      minWidth: pct > 0 ? 3 : 0,
+                    }}
+                  />
+                </div>
+                <p style={{ margin: 0, fontSize: 12, color: "#aaa" }}>
+                  <strong style={{ color: "#ededed" }}>{totalClaimed.toLocaleString()}</strong>
+                  {" "}tokens claimed out of{" "}
+                  <strong style={{ color: "#ededed" }}>{totalDeposited.toLocaleString()}</strong>
+                  {" "}total ({pct.toFixed(1)}%)
+                </p>
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* ── #77: Expired banner ── */}
+      {isExpired && (
+        <div
+          role="alert"
+          style={{
+            padding: "14px 18px",
+            borderRadius: 8,
+            background: "#1a0000",
+            border: "1px solid #ff6b6b",
+            color: "#ff6b6b",
+            fontSize: 14,
+            marginBottom: 20,
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+          }}
+        >
+          <span style={{ fontSize: 20 }}>🔒</span>
+          <span>
+            <strong>This airdrop has expired.</strong>{" "}
+            Unclaimed tokens have been returned to the organiser.
+          </span>
+        </div>
+      )}
+
+      {/* ── #77: Expires-soon warning ── */}
+      {expiresSoon && expirationDate && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            padding: "14px 18px",
+            borderRadius: 8,
+            background: "#1a1000",
+            border: "1px solid #f0a500",
+            color: "#f0a500",
+            fontSize: 14,
+            marginBottom: 20,
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+          }}
+        >
+          <span style={{ fontSize: 20 }}>⏳</span>
+          <span>
+            <strong>This airdrop expires on {expirationDate}.</strong>{" "}
+            Claim soon!
+          </span>
+        </div>
+      )}
+
+      {/* ── #78: Full-page loading overlay while expiration is being fetched ── */}
+      {expirationLoading && (
+        <div
+          role="status"
+          aria-label="Loading airdrop status"
+          aria-live="polite"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            color: "#888",
+            fontSize: 13,
+            marginBottom: 16,
+          }}
+        >
+          <span className="claim-spinner" aria-hidden="true" />
+          Checking airdrop status…
+        </div>
+      )}
 
       <div className="claim-form-section">
 
@@ -277,6 +571,8 @@ export default function ClaimPage() {
               onClick={handleConnectWallet}
               className="claim-btn"
               style={{ background: "#8ae4ff", color: "#000" }}
+              disabled={isLoading}
+              aria-disabled={isLoading}
             >
               Connect Wallet
             </button>
@@ -330,6 +626,8 @@ export default function ClaimPage() {
               aria-controls="tabpanel-url"
               onClick={() => { setTreeSource("url"); setFetchError(""); }}
               className="tab-btn"
+              disabled={isLoading}
+              aria-disabled={isLoading}
             >
               Load from URL
             </button>
@@ -341,6 +639,8 @@ export default function ClaimPage() {
               aria-controls="tabpanel-paste"
               onClick={() => { setTreeSource("paste"); setFetchError(""); }}
               className="tab-btn"
+              disabled={isLoading}
+              aria-disabled={isLoading}
             >
               Paste JSON
             </button>
@@ -367,13 +667,16 @@ export default function ClaimPage() {
                     placeholder="https://example.com/merkle-tree.json"
                     className="claim-input"
                     aria-describedby={fetchError ? "fetch-error" : undefined}
+                    disabled={isLoading}
+                    aria-disabled={isLoading}
                   />
                   <button
                     type="button"
                     onClick={handleFetchTree}
-                    disabled={!treeUrl.trim() || isFetching}
+                    disabled={!treeUrl.trim() || isFetching || isLoading}
                     className="claim-btn"
                     style={{ background: "#8ae4ff", color: "#000" }}
+                    aria-disabled={!treeUrl.trim() || isFetching || isLoading}
                   >
                     {isFetching ? "Fetching…" : "Fetch Tree"}
                   </button>
@@ -423,6 +726,8 @@ export default function ClaimPage() {
                 className="claim-input"
                 style={{ fontFamily: "monospace", fontSize: 12 }}
                 aria-describedby={fetchError ? "paste-error" : undefined}
+                disabled={isLoading}
+                aria-disabled={isLoading}
               />
 
               {treeLoaded && (
@@ -448,11 +753,19 @@ export default function ClaimPage() {
         <button
           type="button"
           onClick={handleCheck}
-          disabled={!walletConnected || status === "checking"}
+          disabled={!walletConnected || isLoading || isExpired}
           className="claim-btn"
           style={{ background: "#8ae4ff", color: "#000" }}
-          aria-disabled={!walletConnected || status === "checking"}
+          aria-disabled={!walletConnected || isLoading || isExpired}
         >
+          {/* #78: Spinner inside the button during 'checking' */}
+          {status === "checking" && (
+            <span
+              className="claim-spinner"
+              role="status"
+              aria-label="Checking eligibility"
+            />
+          )}
           {status === "checking" ? "Checking..." : "Check Eligibility"}
         </button>
 
@@ -480,11 +793,20 @@ export default function ClaimPage() {
           <button
             type="button"
             onClick={handleClaim}
-            disabled={status === "claiming"}
+            disabled={status === "claiming" || isExpired}
             className="claim-btn"
-            style={{ background: "#4caf50", color: "#000" }}
-            aria-disabled={status === "claiming"}
+            style={{ background: isExpired ? "#555" : "#4caf50", color: "#000" }}
+            aria-disabled={status === "claiming" || isExpired}
           >
+            {/* #78: Spinner inside the button during 'claiming' */}
+            {status === "claiming" && (
+              <span
+                className="claim-spinner"
+                role="status"
+                aria-label="Submitting claim transaction"
+                style={{ borderTopColor: "#4caf50" }}
+              />
+            )}
             {status === "claiming" ? "Claiming..." : "Claim Tokens →"}
           </button>
         )}
@@ -496,11 +818,100 @@ export default function ClaimPage() {
               href={`https://stellar.expert/explorer/${network}/tx/${txHash}`}
               target="_blank"
               rel="noopener noreferrer"
-              style={{ color: "#8ae4ff", fontSize: 13 }}
+              style={{ color: "var(--accent)", fontSize: 13 }}
             >
               View transaction on Stellar Expert →
             </a>
           </div>
+        )}
+
+        {/* ── Claim History ── */}
+        {walletConnected && (
+          <section
+            aria-labelledby="claim-history-heading"
+            style={{ marginTop: 24 }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: 10,
+              }}
+            >
+              <h2
+                id="claim-history-heading"
+                style={{ fontSize: 16, fontWeight: 600, margin: 0 }}
+              >
+                Claim History
+              </h2>
+              {claimHistory.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearHistory}
+                  className="tab-btn"
+                  style={{ fontSize: 12 }}
+                >
+                  Clear History
+                </button>
+              )}
+            </div>
+
+            {claimHistory.length === 0 ? (
+              <p style={{ fontSize: 13, color: "#888", margin: 0 }}>
+                No past claims for this address.
+              </p>
+            ) : (
+              <ul
+                style={{
+                  listStyle: "none",
+                  padding: 0,
+                  margin: 0,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                }}
+              >
+                {claimHistory.map((rec) => (
+                  <li
+                    key={rec.txHash}
+                    style={{
+                      padding: "10px 14px",
+                      borderRadius: 8,
+                      background: "#111",
+                      border: "1px solid #333",
+                      fontSize: 13,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4,
+                    }}
+                  >
+                    <span style={{ color: "#aaa" }}>
+                      {new Date(rec.timestamp).toLocaleString()}
+                      {rec.amount ? ` — ${rec.amount} tokens` : ""}
+                    </span>
+                    <span
+                      style={{
+                        fontFamily: "monospace",
+                        wordBreak: "break-all",
+                        color: "#ededed",
+                      }}
+                    >
+                      {rec.txHash}
+                    </span>
+                    <a
+                      href={`https://stellar.expert/explorer/${network}/tx/${rec.txHash}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: "var(--accent)", fontSize: 12 }}
+                    >
+                      View on Stellar Expert →
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
         )}
       </div>
     </div>

@@ -51,6 +51,12 @@ Navigate to the contract directory or run commands targeting the manifest path:
   cargo test --manifest-path contracts/airdrop/Cargo.toml
   ```
 
+> **Cargo.lock:** `Cargo.lock` is committed to the repository so that CI and
+> local builds always use the same resolved dependency versions. When you add,
+> remove, or upgrade a Rust dependency, run `cargo update` (or the relevant
+> `cargo add`/`cargo rm` command) and **commit the updated `Cargo.lock`** in
+> the same PR as the `Cargo.toml` change.
+
 ### 2. TypeScript SDK Workflow (`sdk/`)
 * **Run SDK test suites (Merkle algorithms & tree building):**
   ```bash
@@ -95,6 +101,22 @@ Navigate to the contract directory or run commands targeting the manifest path:
 * The project uses TypeScript strict mode. No `any` types without justification.
 * Run `pnpm lint` in the relevant workspace before opening a PR.
 * Prefer explicit return types on exported functions.
+
+---
+
+## 🤖 Automated Dependency Updates
+
+This repository uses [Dependabot](https://docs.github.com/en/code-security/dependabot) to keep dependencies up to date automatically. Dependabot raises weekly pull requests for outdated packages across all workspaces:
+
+| Ecosystem | Directory | Schedule |
+|-----------|-----------|----------|
+| Cargo (Rust) | `contracts/airdrop/` | Weekly |
+| npm (SDK) | `sdk/` | Weekly |
+| npm (CLI) | `cli/` | Weekly |
+| npm (Web) | `web/` | Weekly |
+| GitHub Actions | `/` | Weekly |
+
+Dependabot PRs are labelled with `dependencies` and the relevant ecosystem tag (e.g. `rust` or `javascript`). Maintainers review and merge them as part of the normal PR process. If you introduce a new package dependency, Dependabot will automatically start tracking it on the next weekly run.
 
 ---
 
