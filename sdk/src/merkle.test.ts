@@ -601,3 +601,74 @@ describe("Issue #31 — property-based tests (fast-check)", () => {
     }
   );
 });
+
+// ─── Issue #114: Contract address (C...) recipient tests ─────────────────────
+
+describe("Issue #114 — contract address (C...) recipients", () => {
+  // A realistic Soroban contract address (C...)
+  const CONTRACT_ADDR_1 =
+    "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
+  const CONTRACT_ADDR_2 =
+    "CAZV4ODJJPJNZQY5DHLNPTDOQP5MNPBZQ5J5J5JN5M5NZQY5DHLNPT";
+
+  it("leafHash works for C... contract addresses", () => {
+    const hash = leafHash(CONTRACT_ADDR_1, 1000n);
+    expect(hash).toBeInstanceOf(Buffer);
+    expect(hash.length).toBe(32);
+  });
+
+  it("C... address produces a different leaf hash than a G... address with same amount", () => {
+    const gHash = leafHash(ADDR_1, 1000n).toString("hex");
+    const cHash = leafHash(CONTRACT_ADDR_1, 1000n).toString("hex");
+    expect(gHash).not.toBe(cHash);
+  });
+
+  it("buildMerkleTree accepts a C... address entry and verifies correctly", () => {
+    const entries = [
+      { address: CONTRACT_ADDR_1, amount: 1000n },
+      { address: ADDR_1, amount: 500n },
+    ];
+    const { root, proofs } = buildMerkleTree(entries);
+
+    const cProof = proofs.get(CONTRACT_ADDR_1)!;
+    expect(cProof).toBeDefined();
+    expect(verifyProof(root, CONTRACT_ADDR_1, 1000n, cProof.proof)).toBe(true);
+  });
+
+  it("C... address proof does not verify for a G... address in the same tree", () => {
+    const entries = [
+      { address: CONTRACT_ADDR_1, amount: 1000n },
+      { address: ADDR_1, amount: 500n },
+    ];
+    const { root, proofs } = buildMerkleTree(entries);
+
+    // Use C... address proof to try to verify G... address claim
+    const cProof = proofs.get(CONTRACT_ADDR_1)!;
+    expect(verifyProof(root, ADDR_1, 1000n, cProof.proof)).toBe(false);
+  });
+
+  it("tree with only C... addresses builds and verifies", () => {
+    const entries = [
+      { address: CONTRACT_ADDR_1, amount: 2000n },
+      { address: CONTRACT_ADDR_2, amount: 3000n },
+    ];
+    const { root, proofs } = buildMerkleTree(entries);
+
+    for (const e of entries) {
+      const p = proofs.get(e.address)!;
+      expect(p).toBeDefined();
+      expect(verifyProof(root, e.address, e.amount, p.proof)).toBe(true);
+    }
+  });
+
+  it("C... address can be the sole entry in a tree", () => {
+    const { root, proofs } = buildMerkleTree([
+      { address: CONTRACT_ADDR_1, amount: 5000n },
+    ]);
+    // Single-entry tree: root equals leaf hash, proof is empty
+    expect(root).toBe(leafHash(CONTRACT_ADDR_1, 5000n).toString("hex"));
+    const p = proofs.get(CONTRACT_ADDR_1)!;
+    expect(p.proof).toEqual([]);
+    expect(verifyProof(root, CONTRACT_ADDR_1, 5000n, [])).toBe(true);
+  });
+});

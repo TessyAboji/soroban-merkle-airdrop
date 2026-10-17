@@ -1266,3 +1266,91 @@ fn test_claim_then_claim_for_fails() {
         "claim_for must fail after regular claim for the same address"
     );
 }
+
+// ─── Issue #114: Contract address (C...) recipient tests ──────────────────
+
+/// A contract address (C...) can be a claimant — the leaf hash and proof
+/// verification must work identically to G-addresses.
+///
+/// We register a dummy contract to obtain a valid C... address, build a
+/// two-leaf tree that includes it, and verify the claim succeeds.
+#[test]
+fn test_contract_address_recipient_claim_succeeds() {
+    let (env, admin, token, contract_id) = setup();
+    let client = AirdropContractClient::new(&env, &contract_id);
+
+    // Register a second dummy contract to get a legitimate C... address.
+    let contract_recipient = env.register(AirdropContract, ());
+
+    let (root, proof, _) =
+        build_two_leaf_tree(&env, &contract_recipient, 750, &admin, 250);
+
+    mint(&env, &token, &admin, &admin, 1000);
+    client.initialize(&admin, &token, &root, &1000, &DEFAULT_EXPIRATION);
+
+    // Contract address claims its allocation.
+    client.claim(&contract_recipient, &750, &proof);
+
+    assert_eq!(
+        TokenClient::new(&env, &token).balance(&contract_recipient),
+        750,
+        "contract recipient must receive its allocated tokens"
+    );
+    assert!(
+        client.is_claimed(&contract_recipient),
+        "contract address must be marked as claimed after a successful claim"
+    );
+}
+
+/// A contract address double-claim must fail with AlreadyClaimed, just like G-addresses.
+#[test]
+fn test_contract_address_double_claim_fails() {
+    let (env, admin, token, contract_id) = setup();
+    let client = AirdropContractClient::new(&env, &contract_id);
+
+    let contract_recipient = env.register(AirdropContract, ());
+
+    let (root, proof, _) =
+        build_two_leaf_tree(&env, &contract_recipient, 750, &admin, 250);
+
+    mint(&env, &token, &admin, &admin, 1000);
+    client.initialize(&admin, &token, &root, &1000, &DEFAULT_EXPIRATION);
+    client.claim(&contract_recipient, &750, &proof);
+
+    let result = client.try_claim(&contract_recipient, &750, &proof);
+    assert_eq!(
+        result,
+        Err(Ok(AirdropError::AlreadyClaimed)),
+        "contract address double-claim must return AlreadyClaimed"
+    );
+}
+
+/// A tree with both a G-address and a C-address as recipients: both claims succeed.
+#[test]
+fn test_mixed_g_and_c_address_tree() {
+    let (env, admin, token, contract_id) = setup();
+    let client = AirdropContractClient::new(&env, &contract_id);
+
+    let g_claimant = Address::generate(&env);
+    let c_claimant = env.register(AirdropContract, ());
+
+    let (root, g_proof, c_proof) =
+        build_two_leaf_tree(&env, &g_claimant, 600, &c_claimant, 400);
+
+    mint(&env, &token, &admin, &admin, 1000);
+    client.initialize(&admin, &token, &root, &1000, &DEFAULT_EXPIRATION);
+
+    client.claim(&g_claimant, &600, &g_proof);
+    client.claim(&c_claimant, &400, &c_proof);
+
+    assert_eq!(
+        TokenClient::new(&env, &token).balance(&g_claimant),
+        600,
+        "G-address claimant must receive tokens"
+    );
+    assert_eq!(
+        TokenClient::new(&env, &token).balance(&c_claimant),
+        400,
+        "C-address claimant must receive tokens"
+    );
+}
