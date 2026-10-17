@@ -258,3 +258,42 @@ export function verifyProof(
 
   return current.toString("hex") === root;
 }
+
+/**
+ * Check whether an address is present in a Merkle tree file's distribution list.
+ *
+ * This is a fast membership check against the `proofs` map of a serialised
+ * `MerkleTreeFile` — it does NOT perform cryptographic verification. Use
+ * {@link verifyProof} if you need to confirm the proof is mathematically valid.
+ *
+ * Distinguishing "not in list" from "invalid proof" is important for UX:
+ * - `isAddressInTree` returns `false` → address was never eligible (show a
+ *   clear "not in list" message rather than a confusing proof error).
+ * - `isAddressInTree` returns `true` but `verifyProof` returns `false` →
+ *   the tree file may be corrupted or from a different airdrop.
+ *
+ * @param address - Stellar strkey address to look up (G... or C...).
+ * @param treeFile - Parsed `MerkleTreeFile` object (from
+ *   {@link fetchMerkleTree} or `JSON.parse`).
+ * @returns `true` if the address has an entry in the proofs map,
+ *   `false` otherwise.
+ *
+ * @example
+ * ```ts
+ * import { fetchMerkleTree, isAddressInTree } from '@soroban-merkle-airdrop/sdk';
+ *
+ * const tree = await fetchMerkleTree('https://example.com/merkle-tree.json');
+ *
+ * if (!isAddressInTree('GABC...', tree)) {
+ *   console.log('Address is not eligible for this airdrop.');
+ * } else {
+ *   console.log('Address is in the list — proceeding to proof verification.');
+ * }
+ * ```
+ */
+export function isAddressInTree(
+  address: string,
+  treeFile: import('./types.js').MerkleTreeFile
+): boolean {
+  return Object.prototype.hasOwnProperty.call(treeFile.proofs, address);
+}

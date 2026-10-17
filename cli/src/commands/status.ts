@@ -12,6 +12,8 @@ import { createAirdropClient, NETWORKS, formatAmount } from "@soroban-merkle-air
 
 export interface StatusOptions {
   address?: string;
+  /** URL to merkle tree file for checking if address is in the list. */
+  treeUrl?: string;
   /** When true, output structured JSON instead of coloured text. */
   json?: boolean;
 }
@@ -78,8 +80,17 @@ export async function runStatusAction(
     }
 
     let claimed: boolean | undefined;
+    let inTree: boolean | undefined;
     if (opts.address) {
       claimed = await client.isClaimed(opts.address);
+      if (opts.treeUrl) {
+        try {
+          const tree = await fetchMerkleTree(opts.treeUrl);
+          inTree = isAddressInTree(opts.address, tree);
+        } catch {
+          // Non-fatal: tree URL may not be available
+        }
+      }
     }
 
     // ── JSON output (Issue #67) ───────────────────────────────────────────
@@ -97,6 +108,7 @@ export async function runStatusAction(
       if (opts.address !== undefined) {
         output["address"] = opts.address;
         output["claimed"] = claimed;
+        if (inTree !== undefined) output["inTree"] = inTree;
       }
       console.log(JSON.stringify(output));
       return;
@@ -141,11 +153,15 @@ export async function runStatusAction(
     console.log(`  ${chalk.bold("Expiration:")}  ${expirationLine}`);
 
     if (opts.address) {
-      console.log(
-        `\n  ${chalk.bold(opts.address)}: ${
-          claimed ? chalk.yellow("already claimed") : chalk.green("not yet claimed")
-        }`
-      );
+      let statusLabel: string;
+      if (claimed) {
+        statusLabel = chalk.yellow("already claimed");
+      } else if (inTree === false) {
+        statusLabel = chalk.red("not in airdrop list");
+      } else {
+        statusLabel = chalk.green("not yet claimed");
+      }
+      console.log(`\n  ${chalk.bold(opts.address)}: ${statusLabel}`);
     }
     console.log();
   } catch (err) {
@@ -157,6 +173,7 @@ export async function runStatusAction(
 export const statusCommand = new Command("status")
   .description("Query on-chain airdrop contract status")
   .option("-a, --address <address>", "Check if a specific address has claimed")
+  .option("--tree-url <url>", "Merkle tree JSON URL — distinguishes 'not in list' from 'not yet claimed'")
   .option("--json", "Output structured JSON instead of coloured text")
   .action(async (opts, cmd) => {
     const globalOpts = cmd.parent?.opts() ?? {};

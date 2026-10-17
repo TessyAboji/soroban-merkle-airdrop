@@ -16,7 +16,7 @@
  */
 
 // ─── Merkle helpers ──────────────────────────────────────────────────────────
-export { buildMerkleTree, leafHash, hashPair, verifyProof } from "./merkle.js";
+export { buildMerkleTree, leafHash, hashPair, verifyProof, isAddressInTree } from "./merkle.js";
 
 // ─── Contract client ─────────────────────────────────────────────────────────
 export { createAirdropClient } from "./client.js";
