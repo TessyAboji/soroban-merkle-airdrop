@@ -2,9 +2,31 @@ import type { Metadata } from "next";
 import { NetworkProvider } from "./context/NetworkContext";
 import NavBar from "./components/NavBar";
 
+/**
+ * Canonical base URL for Open Graph / Twitter card meta tags.
+ * Set NEXT_PUBLIC_BASE_URL in your environment (e.g. https://airdrop.example.com).
+ * Falls back to an empty string so relative URLs still work locally.
+ */
+const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL ?? "";
+
 export const metadata: Metadata = {
   title: "Merkle Airdrop — Stellar",
-  description: "Claim your token allocation from this Merkle airdrop on Stellar.",
+  description:
+    "Claim your token allocation from this gas-efficient Merkle airdrop on Stellar. One compact proof — no batch transfers.",
+  metadataBase: BASE_URL ? new URL(BASE_URL) : undefined,
+  openGraph: {
+    title: "Merkle Airdrop — Stellar",
+    description:
+      "Claim your token allocation from this gas-efficient Merkle airdrop on Stellar. One compact proof — no batch transfers.",
+    type: "website",
+    url: BASE_URL || undefined,
+  },
+  twitter: {
+    card: "summary",
+    title: "Merkle Airdrop — Stellar",
+    description:
+      "Claim your token allocation from this gas-efficient Merkle airdrop on Stellar. One compact proof — no batch transfers.",
+  },
 };
 
 // FOUC-prevention script: runs synchronously before the first paint so the
