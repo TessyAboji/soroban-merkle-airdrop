@@ -126,7 +126,12 @@ impl AirdropContract {
 
         // Transfer tokens from admin into the contract.
         let token_client = TokenClient::new(&env, &token);
-        token_client.transfer(&admin, env.current_contract_address(), &total_amount);
+        token_client
+            .try_decimals()
+            .map_err(|_| AirdropError::InvalidToken)?;
+
+        // Transfer tokens from admin into the contract.
+        token_client.transfer(&admin, &env.current_contract_address(), &total_amount);
 
         env.storage()
             .instance()
